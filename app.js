@@ -1,0 +1,1053 @@
+'use strict';
+/* ============================================================
+ * 核心引擎 app.js（与 data.js 配合使用，请保持同一目录）
+ * ============================================================ */
+/* ============================================================
+ * 工具函数
+ * ============================================================ */
+const $ = s => document.querySelector(s);
+const CATS = ['发音', '语法', '交际', '词汇', '课文精读'];
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function clone(o) { return JSON.parse(JSON.stringify(o)); }
+function uid(p) { return p + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+function pad(n) { return String(n).padStart(2, '0'); }
+function fmtDT(iso) { if (!iso) return ''; const d = new Date(iso); return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+function fmtDateCN(iso) { const d = new Date(iso); return d.getFullYear() + '年' + (d.getMonth()+1) + '月' + d.getDate() + '日'; }
+function fmtTime(iso) { const d = new Date(iso); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
+function unitAbbr(u) { if (!u) return ''; if (u.id === 'review_mid') return '期中'; if (u.id === 'review_final') return '期末'; return u.id.toUpperCase(); }
+function titleShort(t) { return String(t || '').split(/[（(]/)[0].trim(); }
+function catColor(c) { return ({'发音':'bg-sky-100 text-sky-700','语法':'bg-violet-100 text-violet-700','交际':'bg-amber-100 text-amber-700','词汇':'bg-emerald-100 text-emerald-700','课文精读':'bg-rose-100 text-rose-700'}[c]) || 'bg-stone-100 text-stone-600'; }
+const EVAL_EMOJI = { '头部': '🟢', '中等': '🟡', '末尾': '🔴' };
+
+/* ============================================================
+ * 数据管理（唯一入口，所有读写经由此对象）
+ * ============================================================ */
+const STORAGE_KEY = 'teaching_workbench_v1';
+const DataManager = {
+  data: null,
+  load() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) this.data = JSON.parse(raw);
+    } catch (e) { this.data = null; }
+    if (!this.data) {
+      this.data = {
+        timetable: clone(timetable),
+        syllabus: clone(syllabus),
+        knowledgeItems: clone(knowledgeItems),
+        lessons: [],
+        students: clone(students),
+        meta: clone(meta)
+      };
+    }
+    this.ensure();
+  },
+  save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data)); },
+  ensure() {
+    const d = this.data;
+    if (!d.meta) d.meta = clone(meta);
+    d.meta.totalLessons = d.timetable.length;
+    if (!Array.isArray(d.lessons)) d.lessons = [];
+    if (!d.lessons.length) {
+      d.lessons.push({
+        id: 'l1', timetableId: d.timetable[0].id, unitId: d.syllabus[0].id,
+        checkedKnowledgeIds: [], completed: false, completedAt: null,
+        memo: '', memoAt: null, homework: []
+      });
+    }
+    if (!d.meta.currentLessonId || !d.lessons.some(l => l.id === d.meta.currentLessonId)) d.meta.currentLessonId = d.lessons[0].id;
+  },
+  getTimetable(id) { return this.data.timetable.find(t => t.id === id); },
+  getUnit(id) { return this.data.syllabus.find(u => u.id === id); },
+  getKnowledge(id) { return this.data.knowledgeItems.find(k => k.id === id); },
+  getLessonById(id) { return this.data.lessons.find(l => l.id === id); },
+  getLessonByTimetable(tid) { return this.data.lessons.find(l => l.timetableId === tid); },
+  currentLesson() { return this.getLessonById(this.data.meta.currentLessonId); },
+  timetableIndex(tid) { return this.data.timetable.findIndex(t => t.id === tid); },
+  completedCount() { return this.data.lessons.filter(l => l.completed).length; },
+  unitOfKnowledge(kid) { return this.data.syllabus.find(u => u.knowledgeIds.includes(kid)); }
+};
+
+/* ============================================================
+ * 全局状态
+ * ============================================================ */
+const State = {
+  view: 'progress',          // progress | syllabus | syllabusDetail | timetable | lessonDetail | board | notes | students | studentDetail
+  lessonId: null,            // 进度页当前显示的课（回顾用）
+  unitId: null,
+  tid: null,
+  timetableWeek: null,
+  studentId: null,
+  boardCategory: '发音',
+  selectedStudents: new Set(),
+  studentUI: null
+};
+
+/* ============================================================
+ * Toast / 底部抽屉
+ * ============================================================ */
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove('show'), 1800);
+}
+function openSheet(title, bodyHtml) {
+  $('#sheetRoot').innerHTML = `
+    <div id="sheetBackdrop" class="sheet-backdrop" data-action="close-sheet"></div>
+    <div id="sheet" class="sheet">
+      <div class="sticky top-0 bg-white px-5 pt-3 pb-2 flex items-center justify-between border-b border-stone-100">
+        <div class="font-semibold text-[17px]">${esc(title)}</div>
+        <button data-action="close-sheet" class="w-8 h-8 rounded-lg text-stone-400 text-lg">✕</button>
+      </div>
+      <div class="px-5 py-4">${bodyHtml}</div>
+    </div>`;
+  requestAnimationFrame(() => {
+    $('#sheetBackdrop').classList.add('open');
+    $('#sheet').classList.add('open');
+  });
+}
+function closeSheet() {
+  const b = $('#sheetBackdrop'), s = $('#sheet');
+  if (b) b.classList.remove('open');
+  if (s) s.classList.remove('open');
+  setTimeout(() => { $('#sheetRoot').innerHTML = ''; }, 300);
+}
+function downloadText(filename, text, type) {
+  const blob = new Blob([text], { type: type || 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 200);
+}
+
+/* ============================================================
+ * 页面框架
+ * ============================================================ */
+function pageShell(title, body, opts) {
+  opts = opts || {};
+  const left = opts.back
+    ? `<button data-action="${opts.back}" class="w-9 h-9 rounded-xl bg-white border border-stone-200/70 shadow-sm text-lg flex items-center justify-center">←</button>`
+    : `<button data-action="open-sidebar" class="w-9 h-9 rounded-xl bg-white border border-stone-200/70 shadow-sm text-lg flex items-center justify-center">☰</button>`;
+  return `
+    <div class="px-4 pt-4">
+      <div class="flex items-center gap-2 mb-3">
+        ${left}
+        <h1 class="text-[18px] font-bold flex-1 min-w-0">${title}</h1>
+        ${opts.right || ''}
+      </div>
+      <div class="space-y-2">${body}</div>
+    </div>`;
+}
+
+function renderApp() {
+  const navItems = [
+    { key: 'progress', icon: '📈', label: '教学进度' },
+    { key: 'syllabus', icon: '📖', label: '教学大纲' },
+    { key: 'timetable', icon: '📅', label: '课表安排' },
+    { key: 'board', icon: '📊', label: '知识看板' },
+    { key: 'notes', icon: '📝', label: '备注汇总' },
+    { key: 'students', icon: '👨‍🎓', label: '学生档案' }
+  ];
+  $('#app').innerHTML = `
+    <div id="overlay" class="overlay" data-action="close-sidebar"></div>
+    <aside id="drawer" class="drawer safe-top">
+      <div class="px-5 py-6">
+        <div class="flex items-center gap-3 mb-6">
+          <div class="w-10 h-10 rounded-xl bg-[#37352F] text-white flex items-center justify-center text-lg">👩‍🏫</div>
+          <div>
+            <div class="font-semibold text-[17px]">教学工作台</div>
+            <div class="text-xs text-stone-400">En route! · 2026-2027</div>
+          </div>
+        </div>
+        <nav class="space-y-1">
+          ${navItems.map(n => `
+            <button data-action="nav" data-view="${n.key}" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[17px] ${State.view === n.key ? 'bg-[#F0EEE9] font-medium' : 'text-stone-600 hover:bg-[#F7F6F3]'}">
+              <span class="text-lg">${n.icon}</span>${n.label}
+            </button>`).join('')}
+        </nav>
+        <div class="mt-6 pt-4 border-t border-stone-100 space-y-1">
+          <button data-action="backup-export" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[17px] text-stone-600 hover:bg-[#F7F6F3]"><span class="text-lg">💾</span>导出备份</button>
+          <button data-action="backup-import" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[17px] text-stone-600 hover:bg-[#F7F6F3]"><span class="text-lg">📥</span>导入备份</button>
+          <button data-action="clear-data" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[17px] text-red-500 hover:bg-red-50"><span class="text-lg">🗑️</span>清空数据</button>
+        </div>
+      </div>
+    </aside>
+    <main id="main" class="mx-auto w-full max-w-[600px] min-h-screen safe-top safe-bottom pb-24">${renderView()}</main>`;
+}
+
+function renderView() {
+  switch (State.view) {
+    case 'progress': return renderProgress();
+    case 'syllabus': return renderSyllabus();
+    case 'syllabusDetail': return renderSyllabusDetail();
+    case 'timetable': return renderTimetable();
+    case 'lessonDetail': return renderLessonDetail();
+    case 'board': return renderBoard();
+    case 'notes': return renderNotes();
+    case 'students': return renderStudents();
+    case 'studentDetail': return renderStudentDetail();
+    default: return renderProgress();
+  }
+}
+
+/* ============================================================
+ * 模块一：教学进度（默认首页）
+ * ============================================================ */
+function renderProgress() {
+  const d = DataManager.data;
+  const total = d.meta.totalLessons;
+  const done = DataManager.completedCount();
+  const pct = Math.round(done / total * 100);
+  let lesson = State.lessonId ? DataManager.getLessonById(State.lessonId) : DataManager.currentLesson();
+  if (!lesson) lesson = DataManager.currentLesson();
+  const t = DataManager.getTimetable(lesson.timetableId);
+  const unit = DataManager.getUnit(lesson.unitId);
+  const readonly = !!lesson.completed;
+  const isCurrent = lesson.id === d.meta.currentLessonId;
+  const tIdx = DataManager.timetableIndex(lesson.timetableId);
+  const allDone = done >= total;
+
+  const knowledgeRows = unit.knowledgeIds.map(kid => {
+    const k = DataManager.getKnowledge(kid);
+    if (!k) return '';
+    const checked = lesson.checkedKnowledgeIds.includes(kid);
+    return `
+      <div class="flex items-center gap-2 py-1.5">
+        <button data-action="add-hw-knowledge" data-kid="${kid}" ${readonly ? 'disabled' : ''} class="w-7 h-7 shrink-0 flex items-center justify-center rounded-lg border border-stone-200 text-stone-500 ${readonly ? 'opacity-40' : ''}">📝</button>
+        <button data-action="toggle-knowledge" data-kid="${kid}" ${readonly ? 'disabled' : ''} class="flex-1 min-w-0 flex items-start gap-2 text-left">
+          <span class="shrink-0 text-[16px]">${checked ? '☑️' : '⬜️'}</span>
+          <span class="text-[16px] leading-snug ${checked ? 'text-stone-400 line-through' : ''}"><span class="tag ${catColor(k.category)} mr-1">${k.category}</span>${esc(k.name)}</span>
+        </button>
+      </div>`;
+  }).join('');
+
+  const memoBlock = lesson.memo
+    ? `<div class="rounded-xl bg-stone-50 border border-stone-100 px-3 py-2 text-[16px]">${esc(lesson.memo)}<div class="text-[13px] text-stone-400 mt-1">${fmtDT(lesson.memoAt || lesson.completedAt)} · <button data-action="edit-memo" class="text-emerald-600">编辑</button></div></div>`
+    : `<div class="text-[15px] text-stone-400">暂无备注</div>`;
+
+  const hwBlock = (lesson.homework && lesson.homework.length)
+    ? lesson.homework.map(h => `
+        <div class="flex items-start gap-2 rounded-xl bg-stone-50 border border-stone-100 px-3 py-2 text-[16px]">
+          <span class="tag ${catColor(h.category)} shrink-0">${esc(h.category)}</span>
+          <span class="min-w-0">${esc(h.content)}</span>
+        </div>`).join('')
+    : `<div class="text-[15px] text-stone-400">暂无作业</div>`;
+
+  return `
+    <header class="sticky top-0 z-30 bg-[#F7F6F3]/95 backdrop-blur px-4 pt-3 pb-2">
+      <div class="flex items-center gap-2 mb-2">
+        <button data-action="open-sidebar" class="w-9 h-9 rounded-xl bg-white border border-stone-200/70 shadow-sm text-lg">☰</button>
+        <div class="flex-1 text-[17px] font-medium">👩‍🏫 总进度：<span class="font-bold">${done}/${total}</span>课</div>
+        <div class="text-xs text-stone-400">${pct}%</div>
+      </div>
+      <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+    </header>
+    <div class="px-4 pt-3 space-y-3">
+      ${allDone ? `<div class="card px-4 py-3 bg-amber-50 border-amber-200 text-amber-700 text-sm font-medium">🎉 全部 ${total} 节课已完成！</div>` : ''}
+      <div class="card px-3 py-3">
+        <div class="flex items-center gap-2">
+          <button data-action="prev-lesson" class="w-8 h-8 shrink-0 flex items-center justify-center rounded-lg border border-stone-200 text-stone-500 ${tIdx <= 0 ? 'opacity-30 pointer-events-none' : ''}">◀</button>
+          <div class="flex-1 min-w-0 text-[16px] leading-tight">
+            <div class="font-semibold">${t.displayName}</div>
+            <div class="text-xs text-stone-400 mt-0.5">${t.room} · ${t.periods}</div>
+          </div>
+        </div>
+        <div class="mt-2 flex items-center gap-2">
+          <select data-action="unit-change" data-lesson="${lesson.id}" ${readonly || !isCurrent ? 'disabled' : ''} class="flex-1 min-w-0 text-[15px] rounded-lg border border-stone-200 bg-white px-2 py-1.5 focus:outline-none ${readonly ? 'text-stone-400' : ''}">
+            ${d.syllabus.map(u => `<option value="${u.id}" ${u.id === unit.id ? 'selected' : ''}>${unitAbbr(u)} ${esc(titleShort(u.title))}</option>`).join('')}
+          </select>
+          ${readonly
+            ? `<span class="text-xs text-emerald-600 font-medium whitespace-nowrap">✅ ${fmtDT(lesson.completedAt).slice(5, 16)}</span>`
+            : `<span class="text-xs text-stone-400 whitespace-nowrap">未打卡</span>`}
+        </div>
+        ${!isCurrent ? `<button data-action="goto-current" class="mt-2 text-xs text-emerald-600 font-medium">→ 回到当前课程</button>` : ''}
+      </div>
+
+      <div class="card px-3 py-3">
+        <div class="text-[17px] font-semibold mb-1">📌 ${unitAbbr(unit)} 知识点打卡</div>
+        <div class="text-[13px] text-stone-400 mb-1">点击知识点切换完成状态；📝 为该知识点添加作业/练习</div>
+        <div class="space-y-0.5">${knowledgeRows}</div>
+      </div>
+
+      <div class="card px-3 py-3">
+        <div class="text-[17px] font-semibold mb-2">📒 本节课备注</div>
+        ${memoBlock}
+        ${!readonly ? `
+          <div class="flex gap-2 mt-2">
+            <input id="memoInput" class="flex-1 min-w-0 rounded-xl border border-stone-200 px-3 py-2 text-[16px] focus:outline-none focus:border-stone-400" placeholder="记录本节课备注…" value="${esc(lesson.memo || '')}">
+            <button data-action="save-memo" class="shrink-0 rounded-xl bg-[#37352F] text-white text-[15px] px-4">确认添加</button>
+          </div>` : ''}
+      </div>
+
+      <div class="card px-3 py-3">
+        <div class="text-[17px] font-semibold mb-2">📚 本课课后作业</div>
+        <div class="space-y-1">${hwBlock}</div>
+        ${!readonly ? `<button data-action="add-homework" class="mt-2 w-full rounded-xl border border-dashed border-stone-300 py-2 text-[15px] text-stone-500">+ 添加作业</button>` : ''}
+      </div>
+    </div>
+    <div class="fixed left-0 right-0 bottom-0 z-30 px-4 pb-4 safe-bottom pt-3 bg-gradient-to-t from-[#F7F6F3] via-[#F7F6F3]/95 to-transparent">
+      ${readonly
+        ? `<button disabled class="w-full rounded-2xl bg-stone-200 text-stone-400 py-3.5 text-[17px] font-semibold">✅ 已打卡</button>`
+        : `<button data-action="complete-lesson" class="w-full rounded-2xl bg-[#4CAF50] text-white py-3.5 text-[17px] font-semibold shadow-lg shadow-emerald-200 active:scale-[0.99]">✅ 完成本课打卡</button>`}
+    </div>`;
+}
+
+/* ============================================================
+ * 模块二：教学大纲
+ * ============================================================ */
+function renderSyllabus() {
+  const rows = DataManager.data.syllabus.map(u => {
+    const checked = (u.checkedKnowledgeIds || []).length;
+    const total = u.knowledgeIds.length;
+    let status;
+    if (u.completed) status = `<span class="text-emerald-600 text-[15px] font-medium whitespace-nowrap">✅ 已完成</span>`;
+    else if (checked > 0) status = `<span class="text-amber-600 text-[15px] font-medium whitespace-nowrap">⏳ ${checked}/${total}</span>`;
+    else status = `<span class="text-stone-400 text-[15px] whitespace-nowrap">⬜ 未开始</span>`;
+    return `
+      <button data-action="open-unit" data-unit="${u.id}" class="w-full card px-3 py-3 flex items-center gap-2 active:scale-[0.995]">
+        <span class="w-10 h-10 rounded-xl ${u.id.includes('review') ? 'bg-amber-50 border border-amber-200' : 'bg-[#F0EEE9]'} flex items-center justify-center text-[17px] font-semibold shrink-0">${unitAbbr(u)}</span>
+        <span class="flex-1 min-w-0 text-left text-[16px] font-medium leading-snug">${esc(titleShort(u.title))}</span>
+        ${status}
+        <span class="text-stone-300">›</span>
+      </button>`;
+  }).join('');
+  return pageShell('📖 教学大纲', rows + `<div class="text-[13px] text-stone-400 px-2 pt-1">数据源：Corpus/FLE · 可配合《教学大纲与知识点.md》修改</div>`);
+}
+
+function renderSyllabusDetail() {
+  const unit = DataManager.getUnit(State.unitId);
+  if (!unit) { State.view = 'syllabus'; return renderSyllabus(); }
+  const rows = unit.knowledgeIds.map(kid => {
+    const k = DataManager.getKnowledge(kid);
+    if (!k) return '';
+    const checked = (unit.checkedKnowledgeIds || []).includes(kid);
+    return `
+      <div class="card px-3 py-2.5 flex items-center gap-2">
+        <span class="text-[16px] shrink-0">${checked ? '✅' : '⬜'}</span>
+        <span class="tag ${catColor(k.category)} shrink-0">${k.category}</span>
+        <span class="flex-1 min-w-0 text-[16px] ${checked ? 'text-stone-400' : ''}">${esc(k.name)}</span>
+        <button data-action="edit-knowledge" data-unit="${unit.id}" data-kid="${kid}" class="text-stone-400 text-[15px] px-1">✏️</button>
+        <button data-action="unlink-knowledge" data-unit="${unit.id}" data-kid="${kid}" class="text-stone-400 text-[15px] px-1">🗑️</button>
+      </div>`;
+  }).join('');
+  return pageShell(`${unitAbbr(unit)}: ${esc(titleShort(unit.title))}`,
+    (rows || `<div class="text-[15px] text-stone-400 px-2">暂无知识点，点击下方添加</div>`) +
+    `<button data-action="open-add-knowledge" class="w-full rounded-2xl bg-[#37352F] text-white py-3 text-[16px] font-medium fixed bottom-0 left-0 right-0 mx-auto max-w-md safe-bottom">+ 添加知识点</button>`,
+    { back: 'open-syllabus', right: `<span class="text-xs text-stone-400 whitespace-nowrap">${(unit.checkedKnowledgeIds || []).length}/${unit.knowledgeIds.length}</span>` });
+}
+
+function openAddKnowledgeSheet() {
+  const unit = DataManager.getUnit(State.unitId);
+  if (!unit) return;
+  const avail = DataManager.data.knowledgeItems.filter(k => !unit.knowledgeIds.includes(k.id));
+  openSheet('添加知识点', `
+    <button data-action="new-knowledge" class="w-full mb-3 rounded-xl border border-dashed border-stone-300 py-2.5 text-[15px] text-stone-500">＋ 新建知识点</button>
+    <div class="text-[14px] text-stone-400 mb-1">从全局知识点库选择：</div>
+    <div class="space-y-1.5 max-h-64 overflow-y-auto">
+      ${avail.map(k => `<button data-action="pick-knowledge" data-kid="${k.id}" class="w-full card px-3 py-2 flex items-center gap-2 text-left"><span class="tag ${catColor(k.category)} shrink-0">${k.category}</span><span class="text-[15px] min-w-0">${esc(k.name)}</span></button>`).join('') || '<div class="text-stone-400 text-[15px]">知识点库已全部关联到本项目</div>'}
+    </div>`);
+}
+function openNewKnowledgeSheet() {
+  openSheet('新建知识点', `
+    <div class="space-y-3">
+      <div><label class="text-[15px] text-stone-500">名称</label>
+        <input id="nkName" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none focus:border-stone-400" placeholder="知识点名称"></div>
+      <div><label class="text-[15px] text-stone-500">分类</label>
+        <select id="nkCat" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">${CATS.map(c => `<option>${c}</option>`).join('')}</select></div>
+      <button data-action="save-new-knowledge" class="w-full rounded-xl bg-[#37352F] text-white py-3 text-[16px] font-medium">保存</button>
+    </div>`);
+}
+function openEditKnowledgeSheet(kid) {
+  const k = DataManager.getKnowledge(kid);
+  if (!k) return;
+  openSheet('编辑知识点', `
+    <div class="space-y-3">
+      <div><label class="text-[15px] text-stone-500">名称</label>
+        <input id="ekName" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none" value="${esc(k.name)}"></div>
+      <div><label class="text-[15px] text-stone-500">分类</label>
+        <select id="ekCat" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">${CATS.map(c => `<option ${c === k.category ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
+      <button data-action="save-edit-knowledge" data-kid="${kid}" class="w-full rounded-xl bg-[#37352F] text-white py-3 text-[16px] font-medium">保存</button>
+    </div>`);
+}
+
+/* ============================================================
+ * 模块三：课表安排
+ * ============================================================ */
+function renderTimetable() {
+  const d = DataManager.data;
+  const allDone = DataManager.completedCount() >= d.meta.totalLessons;
+  const cur = DataManager.currentLesson();
+  const curWeek = cur ? DataManager.getTimetable(cur.timetableId).week : 1;
+  const week = State.timetableWeek || curWeek;
+  const weeks = [...new Set(d.timetable.map(t => t.week))];
+  const days = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  const byDay = {};
+  d.timetable.filter(t => t.week === week).forEach(t => { (byDay[t.day] = byDay[t.day] || []).push(t); });
+  const body = `
+    ${allDone ? `<div class="card px-4 py-3 bg-amber-50 border-amber-200 text-amber-700 text-sm font-medium">🎉 全部 ${d.meta.totalLessons} 节课已完成！</div>` : ''}
+    <div class="flex flex-wrap gap-1.5">
+      ${weeks.map(w => `<button data-action="week-tab" data-week="${w}" class="px-3 py-1.5 rounded-full text-[14px] ${w === week ? 'bg-[#37352F] text-white font-medium' : 'bg-white border border-stone-200 text-stone-500'}">第${w}周</button>`).join('')}
+    </div>
+    ${days.map(day => {
+      const ts = byDay[day] || [];
+      if (!ts.length) return '';
+      return `<div><div class="text-[15px] font-semibold text-stone-500 mt-3 mb-1">${day}</div>
+        <div class="space-y-1.5">${ts.map(t => {
+          const l = DataManager.getLessonByTimetable(t.id);
+          const u = l ? DataManager.getUnit(l.unitId) : null;
+          const done = !!(l && l.completed);
+          return `<div class="w-full card px-3 py-2.5 flex items-center gap-2">
+            <button data-action="open-lesson" data-tid="${t.id}" class="flex-1 min-w-0 text-left">
+              <span class="w-2.5 h-2.5 inline-block rounded-full ${done ? 'bg-emerald-500' : 'bg-stone-300'} mr-1"></span>
+              <span class="text-[16px] font-medium leading-snug">${t.day} 第${t.period}节 · ${u ? esc(titleShort(u.title)) : '未开始'}</span>
+              <span class="block text-[13px] text-stone-400 mt-0.5">${t.room} · ${t.periods}${done ? ' · ✅ ' + fmtDT(l.completedAt) : ''}</span>
+            </button>
+            <button data-action="edit-schedule" data-tid="${t.id}" class="w-7 h-7 shrink-0 flex items-center justify-center rounded-lg border border-stone-200 text-stone-400 text-[15px]">✏️</button>
+          </div>`;
+        }).join('')}</div></div>`;
+    }).join('')}`;
+  return pageShell('📅 课表安排', body);
+}
+
+function openScheduleEditSheet(tid) {
+  const t = DataManager.getTimetable(tid);
+  if (!t) return;
+  const days = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  openSheet('调课 / 修改时间', `
+    <div class="space-y-3">
+      <div class="grid grid-cols-2 gap-2">
+        <div><label class="text-[15px] text-stone-500">周次</label>
+          <input id="schWeek" type="number" min="1" max="17" value="${t.week}" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none"></div>
+        <div><label class="text-[15px] text-stone-500">星期</label>
+          <select id="schDay" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">${days.map(d => `<option ${d === t.day ? 'selected' : ''}>${d}</option>`).join('')}</select></div>
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div><label class="text-[15px] text-stone-500">当日第几节</label>
+          <input id="schPeriod" type="number" min="1" max="6" value="${t.period}" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none"></div>
+        <div><label class="text-[15px] text-stone-500">节次</label>
+          <select id="schSlots" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">${['1-2节', '3-4节', '5-6节', '7-8节', '9-10节'].map(x => `<option ${x === t.periods ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+      </div>
+      <div><label class="text-[15px] text-stone-500">教室</label>
+        <input id="schRoom" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none" value="${esc(t.room)}"></div>
+      <div class="text-[14px] text-stone-400">调课后课表将按新时间显示；打卡推进顺序仍按原课程顺序。</div>
+      <button data-action="save-schedule" data-tid="${tid}" class="w-full rounded-xl bg-[#37352F] text-white py-3 text-[16px] font-medium">保存</button>
+    </div>`);
+}
+
+function renderLessonDetail() {
+  const t = DataManager.getTimetable(State.tid);
+  if (!t) { State.view = 'timetable'; return renderTimetable(); }
+  const l = DataManager.getLessonByTimetable(t.id);
+  const u = l ? DataManager.getUnit(l.unitId) : null;
+  const done = !!(l && l.completed);
+  const rows = u
+    ? u.knowledgeIds.map(kid => {
+        const k = DataManager.getKnowledge(kid);
+        if (!k) return '';
+        const c = l.checkedKnowledgeIds.includes(kid);
+        return `<div class="card px-3 py-2 flex items-center gap-2 text-[16px]"><span class="shrink-0">${c ? '☑️' : '⬜️'}</span><span class="tag ${catColor(k.category)} shrink-0">${k.category}</span><span class="min-w-0 ${c ? 'text-stone-400' : ''}">${esc(k.name)}</span></div>`;
+      }).join('')
+    : `<div class="text-[15px] text-stone-400 px-1">尚未开始（未打卡到此课）</div>`;
+  const body = `
+    <div class="card px-4 py-3 space-y-1">
+      <div class="text-[17px] font-semibold">${t.displayName}</div>
+      <div class="text-[15px] text-stone-500">${t.room} · ${t.periods}</div>
+      <div class="text-[15px] text-stone-500">${u ? unitAbbr(u) + ' ' + esc(titleShort(u.title)) : '未关联教学项目'}</div>
+      <div class="text-[15px] ${done ? 'text-emerald-600' : 'text-stone-400'}">${done ? '✅ 已打卡 ' + fmtDT(l.completedAt) : '⚪ 未打卡'}</div>
+    </div>
+    <div class="text-[16px] font-semibold pt-1">知识点完成情况</div>
+    <div class="space-y-1.5">${rows}</div>
+    ${l && l.memo ? `<div class="text-[16px] font-semibold pt-1">备注</div><div class="card px-3 py-2 text-[16px]">${esc(l.memo)}<div class="text-[13px] text-stone-400 mt-1">${fmtDT(l.memoAt)}</div></div>` : ''}
+    ${l && l.homework && l.homework.length ? `<div class="text-[16px] font-semibold pt-1">课后作业</div><div class="space-y-1.5">${l.homework.map(h => `<div class="card px-3 py-2 text-[16px]"><span class="tag ${catColor(h.category)} mr-1">${esc(h.category)}</span>${esc(h.content)}</div>`).join('')}</div>` : ''}`;
+  return pageShell('课程详情', body, { back: 'open-timetable' });
+}
+
+/* ============================================================
+ * 模块四：知识看板
+ * ============================================================ */
+function renderBoard() {
+  const cat = State.boardCategory || '发音';
+  const total = DataManager.data.knowledgeItems.length;
+  const doneY = DataManager.data.knowledgeItems.filter(k => {
+    const u = DataManager.unitOfKnowledge(k.id);
+    return u && (u.checkedKnowledgeIds || []).includes(k.id);
+  }).length;
+  const pracZ = DataManager.data.knowledgeItems.filter(k => k.practices && k.practices.length).length;
+  const items = DataManager.data.knowledgeItems.filter(k => k.category === cat).map(k => {
+    const u = DataManager.unitOfKnowledge(k.id);
+    const c = u && (u.checkedKnowledgeIds || []).includes(k.id);
+    return `
+      <div class="card px-3 py-2.5 flex items-center gap-2">
+        <span class="shrink-0">${c ? '🟢' : '⚪'}</span>
+        <span class="flex-1 min-w-0 text-[16px] ${c ? 'text-stone-400' : ''}">${esc(k.name)}</span>
+        <span class="text-[14px] text-stone-400 shrink-0">${u ? unitAbbr(u) : ''}</span>
+        ${k.practices && k.practices.length ? `<button data-action="view-practices" data-kid="${k.id}" class="text-[15px] shrink-0">📝</button>` : ''}
+      </div>`;
+  }).join('');
+  return pageShell('📊 知识看板', `
+    <div class="card px-4 py-3 text-[15px] text-stone-500">📊 知识看板 · 总数 <b class="text-[#37352F]">${total}</b> · 已完成 <b class="text-emerald-600">${doneY}</b> · 练习 <b class="text-amber-600">${pracZ}</b></div>
+    <div class="flex flex-wrap gap-1.5">${CATS.map(c => `<button data-action="board-cat" data-cat="${c}" class="px-3 py-1.5 rounded-full text-[14px] ${c === cat ? 'bg-[#37352F] text-white' : 'bg-white border border-stone-200 text-stone-500'}">${c}</button>`).join('')}</div>
+    <div class="space-y-1.5">${items || '<div class="text-[15px] text-stone-400 px-1">暂无知识点</div>'}</div>`);
+}
+
+/* ============================================================
+ * 模块五：备注汇总
+ * ============================================================ */
+function collectNotes() {
+  const out = [];
+  DataManager.data.lessons.forEach(l => {
+    const t = DataManager.getTimetable(l.timetableId);
+    const u = DataManager.getUnit(l.unitId);
+    const lab = u ? `[${unitAbbr(u)}-${titleShort(u.title)}` : '[';
+    if (l.memo) out.push({ ts: l.memoAt || l.completedAt || new Date().toISOString(), date: fmtDateCN(l.memoAt || l.completedAt || Date.now()), group: t ? t.displayName : '', label: lab + ' 备注]', text: l.memo, kind: 'memo' });
+    (l.homework || []).forEach(h => out.push({ ts: h.timestamp, date: fmtDateCN(h.timestamp), group: t ? t.displayName : '', label: lab + ' 作业]', text: h.content, kind: 'hw' }));
+  });
+  DataManager.data.knowledgeItems.forEach(k => (k.practices || []).forEach(p => {
+    out.push({ ts: p.timestamp, date: fmtDateCN(p.timestamp), group: '', label: `[${k.category}-${titleShort(k.name)} 练习]`, text: p.note || '（已布置练习）', kind: 'practice' });
+  }));
+  out.sort((a, b) => new Date(b.ts) - new Date(a.ts));
+  return out;
+}
+function renderNotes() {
+  const notes = collectNotes();
+  const groups = {};
+  notes.forEach(n => { (groups[n.date] = groups[n.date] || []).push(n); });
+  const body = Object.keys(groups).map(key => `
+    <div>
+      <div class="text-[15px] font-semibold text-stone-500 mt-2 mb-1">${esc(key)}</div>
+      <div class="space-y-1.5">${groups[key].map(n => `
+        <div class="card px-3 py-2 text-[16px] leading-snug">
+          <span class="text-[13px] text-stone-400 mr-1">${fmtTime(n.ts)}</span>
+          <span class="tag ${n.kind === 'memo' ? 'bg-blue-100 text-blue-700' : n.kind === 'hw' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}">${esc(n.label)}</span>
+          <span class="block mt-1">${esc(n.text)}</span>
+        </div>`).join('')}
+      </div>
+    </div>`).join('');
+  return pageShell('📝 备注汇总', body || '<div class="text-[15px] text-stone-400 px-1">暂无备注</div>', {
+    right: `<button data-action="export-notes" class="text-[14px] text-emerald-600 font-medium bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">📋 导出全部</button>`
+  });
+}
+
+/* ============================================================
+ * 模块六：学生档案
+ * ============================================================ */
+function renderStudents() {
+  const all = DataManager.data.students;
+  const rows = all.map(s => {
+    const last = [...(s.records || [])].reverse().find(r => r.type === 'evaluation');
+    const issue = last && last.coreIssues && last.coreIssues.length ? last.coreIssues.join('、') : '-';
+    const evEmoji = last && last.evaluation ? (EVAL_EMOJI[last.evaluation] || '') : '';
+    const sel = State.selectedStudents.has(s.id);
+    return `
+      <div class="card px-3 py-2.5 flex items-center gap-2">
+        <input type="checkbox" data-action="select-student" data-sid="${s.id}" ${sel ? 'checked' : ''} class="w-5 h-5 accent-[#37352F] shrink-0">
+        <button data-action="open-student" data-sid="${s.id}" class="flex-1 min-w-0 text-left">
+          <span class="block text-[16px] font-medium">${esc(s.name)}${evEmoji ? ` <span class="text-[14px]">${evEmoji}</span>` : ''}</span>
+          <span class="block text-[13px] text-stone-400">${esc(s.studentNo)} · 最新问题：${esc(issue)}</span>
+        </button>
+        <button data-action="edit-student" data-sid="${s.id}" class="w-7 h-7 shrink-0 flex items-center justify-center rounded-lg border border-stone-200 text-stone-400 text-[15px]">✏️</button>
+        <button data-action="delete-student" data-sid="${s.id}" class="w-7 h-7 shrink-0 flex items-center justify-center rounded-lg border border-stone-200 text-stone-400 text-[15px]">🗑️</button>
+      </div>`;
+  }).join('');
+  const selN = State.selectedStudents.size;
+  return pageShell('👨‍🎓 学生档案', `
+    <button data-action="add-student" class="w-full rounded-xl border border-dashed border-stone-300 py-2.5 text-[15px] text-stone-500">＋ 添加学生</button>
+    <div class="flex items-center justify-between">
+      <label class="flex items-center gap-2 text-[15px] text-stone-500"><input type="checkbox" data-action="select-all" ${selN === all.length ? 'checked' : ''} class="w-5 h-5 accent-[#37352F]"> ☑ 全选（${selN}/${all.length}）</label>
+      <button data-action="export-students" class="text-[14px] text-emerald-600 font-medium bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">📤 导出选中</button>
+    </div>
+    <div class="space-y-1.5">${rows}</div>`, { right: '' });
+}
+
+function openStudentFormSheet(sid) {
+  const s = sid ? DataManager.data.students.find(x => x.id === sid) : null;
+  openSheet(s ? '编辑学生' : '添加学生', `
+    <div class="space-y-3">
+      <div><label class="text-[15px] text-stone-500">学号</label>
+        <input id="stuNo" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none focus:border-stone-400" placeholder="请输入学号" value="${s ? esc(s.studentNo) : ''}"></div>
+      <div><label class="text-[15px] text-stone-500">姓名</label>
+        <input id="stuName" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none focus:border-stone-400" placeholder="学生姓名" value="${s ? esc(s.name) : ''}"></div>
+      <button data-action="save-student" data-sid="${sid || ''}" class="w-full rounded-xl bg-[#37352F] text-white py-3 text-[16px] font-medium">保存</button>
+    </div>`);
+}
+
+function studentUI() {
+  if (!State.studentUI) State.studentUI = { evaluation: null, issues: new Set(), tags: new Set(), status: null, memo: '' };
+  return State.studentUI;
+}
+function syncStudentInputs() {
+  const ui = State.studentUI;
+  if (!ui) return;
+  const m = $('#quickMemo'); if (m) ui.memo = m.value;
+  const ni = $('#newIssue'); if (ni && ni.value.trim()) ui.newIssue = ni.value.trim();
+  const nt = $('#newTag'); if (nt && nt.value.trim()) ui.newTag = nt.value.trim();
+}
+function weekOfDate(d) {
+  const start = new Date(DataManager.data.meta.semesterStart + 'T00:00:00');
+  const diff = Math.floor((d - start) / 86400000);
+  return diff < 0 ? 0 : Math.floor(diff / 7) + 1;
+}
+
+function renderStudentDetail() {
+  const s = DataManager.data.students.find(x => x.id === State.studentId);
+  if (!s) { State.view = 'students'; return renderStudents(); }
+  const ui = studentUI();
+  const tl = [...(s.records || [])].reverse().map(r => {
+    const d = new Date(r.timestamp);
+    const w = weekOfDate(d);
+    if (r.type === 'evaluation') {
+      return `<div class="card px-3 py-2 text-[15px] leading-relaxed">${fmtDateCN(r.timestamp)}（第${w}周）｜总体评价：${r.evaluation || '未填'}｜核心问题：${(r.coreIssues || []).join('、') || '未填'}</div>`;
+    }
+    return `<div class="card px-3 py-2 text-[15px] leading-relaxed">${fmtDateCN(r.timestamp)}（第${w}周）｜标签：${(r.tags || []).join('、') || '未填'}｜状态：${r.status || '未填'}｜备忘：${r.memo || '未填'}</div>`;
+  }).join('');
+  const issues = DataManager.data.meta.coreIssueOptions || [];
+  const tags = DataManager.data.meta.customTags || [];
+  const chip = (val, set, action) => `<button data-action="${action}" data-val="${val}" class="px-2.5 py-1 rounded-full text-[14px] border ${set.has(val) ? 'border-[#37352F] bg-[#F0EEE9] font-medium' : 'border-stone-200'}">${esc(val)}</button>`;
+  return pageShell(`${esc(s.name)} <span class="text-[14px] text-stone-400 font-normal">${esc(s.studentNo)}</span>`, `
+    <div class="card px-4 py-3">
+      <div class="text-[16px] font-semibold mb-2">📊 总体评价 + 核心问题</div>
+      <div class="flex gap-2 mb-3">${[['🟢', '头部'], ['🟡', '中等'], ['🔴', '末尾']].map(([e, l]) => `<button data-action="set-evaluation" data-val="${l}" class="flex-1 py-2 rounded-xl border text-[15px] ${ui.evaluation === l ? 'border-[#37352F] bg-[#F0EEE9] font-medium' : 'border-stone-200'}">${e} ${l}</button>`).join('')}</div>
+      <div class="flex flex-wrap gap-1.5 mb-2">${issues.map(o => chip(o, ui.issues, 'toggle-issue')).join('')}</div>
+      <div class="flex gap-2 mb-3"><input id="newIssue" class="flex-1 min-w-0 rounded-xl border border-stone-200 px-3 py-2 text-[15px] focus:outline-none" placeholder="+ 新增问题"><button data-action="add-issue" class="shrink-0 rounded-xl border border-stone-200 px-3 text-[15px]">添加</button></div>
+      <button data-action="submit-evaluation" class="w-full rounded-xl bg-[#37352F] text-white py-2.5 text-[15px] font-medium">提交记录</button>
+    </div>
+    <div class="card px-4 py-3">
+      <div class="text-[16px] font-semibold mb-2">⚡ 快速记录</div>
+      <div class="flex flex-wrap gap-1.5 mb-2">${tags.map(t => chip(t, ui.tags, 'toggle-tag')).join('')}</div>
+      <div class="flex gap-2 mb-2"><input id="newTag" class="flex-1 min-w-0 rounded-xl border border-stone-200 px-3 py-2 text-[15px] focus:outline-none" placeholder="+ 新标签"><button data-action="add-tag" class="shrink-0 rounded-xl border border-stone-200 px-3 text-[15px]">添加</button></div>
+      <div class="flex gap-2 mb-2">${[['🔴', '待巩固'], ['🟡', '观察中'], ['🟢', '已攻克']].map(([e, l]) => `<button data-action="set-status" data-val="${l}" class="flex-1 py-2 rounded-xl border text-[15px] ${ui.status === l ? 'border-[#37352F] bg-[#F0EEE9] font-medium' : 'border-stone-200'}">${e} ${l}</button>`).join('')}</div>
+      <input id="quickMemo" class="w-full rounded-xl border border-stone-200 px-3 py-2 text-[15px] mb-2 focus:outline-none" placeholder="1行备忘" value="${esc(ui.memo || '')}">
+      <button data-action="save-quick" class="w-full rounded-xl bg-[#37352F] text-white py-2.5 text-[15px] font-medium">保存</button>
+    </div>
+    <div class="text-[16px] font-semibold pt-1">📜 问题演变时间轴</div>
+    <div class="space-y-1.5">${tl || '<div class="text-[15px] text-stone-400 px-1">暂无记录</div>'}</div>`,
+    { back: 'open-students' });
+}
+
+function buildExport(format) {
+  const sel = State.selectedStudents.size
+    ? DataManager.data.students.filter(s => State.selectedStudents.has(s.id))
+    : DataManager.data.students;
+  if (format === 'md') {
+    let md = `# 学生档案导出 - ${fmtDT(new Date().toISOString()).slice(0, 10)}\n\n`;
+    sel.forEach(s => {
+      md += `## ${s.name}（${s.studentNo}）\n`;
+      const lastEval = [...(s.records || [])].reverse().find(r => r.type === 'evaluation');
+      if (lastEval) {
+        md += `- **总体评价**：${lastEval.evaluation || '（未填）'}\n`;
+        md += `- **核心问题**：${(lastEval.coreIssues || []).join('、') || '（未填）'}\n`;
+      }
+      md += `\n### 记录时间轴\n`;
+      [...(s.records || [])].reverse().forEach(r => {
+        if (r.type === 'evaluation') md += `- ${fmtDT(r.timestamp)}｜总体评价：${r.evaluation || '未填'}｜核心问题：${(r.coreIssues || []).join('、') || '未填'}\n`;
+        else md += `- ${fmtDT(r.timestamp)}｜标签：${(r.tags || []).join('、') || '未填'}｜状态：${r.status || '未填'}｜备忘：${r.memo || '未填'}\n`;
+      });
+      md += '\n';
+    });
+    return md;
+  }
+  return sel.map(s => JSON.stringify({
+    name: s.name, studentNo: s.studentNo,
+    records: (s.records || []).map(r => Object.assign(
+      { date: fmtDT(r.timestamp) },
+      r.type === 'evaluation'
+        ? { type: 'evaluation', evaluation: r.evaluation, coreIssues: r.coreIssues }
+        : { type: 'quick', tags: r.tags, status: r.status, memo: r.memo }
+    ))
+  })).join('\n');
+}
+
+/* ============================================================
+ * 作业/练习弹窗
+ * ============================================================ */
+function openHomeworkSheet(presetCat, lessonId, kidId) {
+  openSheet('添加作业/练习', `
+    <div class="space-y-3">
+      <div><label class="text-[15px] text-stone-500">分类</label>
+        <select id="hwCat" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">${CATS.map(c => `<option ${c === presetCat ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
+      <div><label class="text-[15px] text-stone-500">内容</label>
+        <textarea id="hwContent" rows="2" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none focus:border-stone-400" placeholder="作业/练习内容"></textarea></div>
+      <button data-action="save-homework" data-lesson="${lessonId}" data-kid="${kidId || ''}" class="w-full rounded-xl bg-[#37352F] text-white py-3 text-[16px] font-medium">保存</button>
+    </div>`);
+}
+
+/* ============================================================
+ * 动作处理（事件委托）
+ * ============================================================ */
+function handleAction(action, el) {
+  const d = DataManager.data;
+  switch (action) {
+    case 'open-sidebar': $('#drawer').classList.add('open'); $('#overlay').classList.add('open'); break;
+    case 'close-sidebar': $('#drawer').classList.remove('open'); $('#overlay').classList.remove('open'); break;
+    case 'nav':
+      State.view = el.dataset.view; State.lessonId = null; State.unitId = null; State.tid = null;
+      State.timetableWeek = null; State.studentId = null; State.studentUI = null; State.boardCategory = '发音';
+      $('#drawer').classList.remove('open'); $('#overlay').classList.remove('open');
+      renderApp(); break;
+
+    /* ---- 教学进度 ---- */
+    case 'prev-lesson': {
+      const cur = DataManager.currentLesson();
+      const ti = DataManager.timetableIndex(cur.timetableId);
+      if (ti > 0) {
+        const prev = DataManager.getLessonByTimetable(d.timetable[ti - 1].id);
+        if (prev) { State.lessonId = prev.id; renderApp(); }
+      }
+      break;
+    }
+    case 'goto-current': State.lessonId = null; renderApp(); break;
+    case 'toggle-knowledge': {
+      const lesson = DataManager.getLessonById(State.lessonId || d.meta.currentLessonId);
+      if (!lesson || lesson.completed) break;
+      const kid = el.dataset.kid;
+      const i = lesson.checkedKnowledgeIds.indexOf(kid);
+      if (i >= 0) lesson.checkedKnowledgeIds.splice(i, 1); else lesson.checkedKnowledgeIds.push(kid);
+      DataManager.save(); renderApp(); break;
+    }
+    case 'add-hw-knowledge': {
+      const lesson = DataManager.getLessonById(State.lessonId || d.meta.currentLessonId);
+      const k = DataManager.getKnowledge(el.dataset.kid);
+      if (lesson && k) openHomeworkSheet(k.category, lesson.id, k.id);
+      break;
+    }
+    case 'save-memo': {
+      const lesson = DataManager.getLessonById(State.lessonId || d.meta.currentLessonId);
+      if (!lesson || lesson.completed) break;
+      const v = $('#memoInput').value.trim();
+      lesson.memo = v; lesson.memoAt = new Date().toISOString();
+      DataManager.save(); renderApp(); toast(v ? '备注已保存' : '备注已清空'); break;
+    }
+    case 'edit-memo': {
+      const inp = $('#memoInput');
+      if (inp) { inp.focus(); inp.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+      break;
+    }
+    case 'add-homework': {
+      const lesson = DataManager.getLessonById(State.lessonId || d.meta.currentLessonId);
+      if (lesson && !lesson.completed) openHomeworkSheet('', lesson.id, '');
+      break;
+    }
+    case 'save-homework': {
+      const cat = $('#hwCat').value, content = $('#hwContent').value.trim();
+      const lesson = DataManager.getLessonById(el.dataset.lesson);
+      if (!lesson) break;
+      const kid = el.dataset.kid || '';
+      if (!kid && !content) { toast('请填写作业内容'); break; }
+      const ts = new Date().toISOString();
+      lesson.homework.push({ category: cat, content: content || '（练习）', timestamp: ts });
+      if (kid) {
+        const k = DataManager.getKnowledge(kid);
+        if (k) k.practices.push({ timestamp: ts, note: content || '已布置练习' });
+      }
+      DataManager.save(); closeSheet(); renderApp(); toast('已保存'); break;
+    }
+    case 'complete-lesson': {
+      const lesson = DataManager.currentLesson();
+      if (!lesson || lesson.completed) break;
+      lesson.completed = true; lesson.completedAt = new Date().toISOString();
+      const unit = DataManager.getUnit(lesson.unitId);
+      unit.checkedKnowledgeIds = [...new Set([...(unit.checkedKnowledgeIds || []), ...lesson.checkedKnowledgeIds])];
+      if (unit.knowledgeIds.every(kid => unit.checkedKnowledgeIds.includes(kid))) {
+        unit.completed = true; unit.completedAt = new Date().toISOString();
+      }
+      const ti = DataManager.timetableIndex(lesson.timetableId);
+      const nextT = d.timetable[ti + 1];
+      if (nextT) {
+        let next = DataManager.getLessonByTimetable(nextT.id);
+        if (!next) {
+          next = { id: uid('l'), timetableId: nextT.id, unitId: unit.id, checkedKnowledgeIds: [], completed: false, completedAt: null, memo: '', memoAt: null, homework: [] };
+          d.lessons.push(next);
+        }
+        d.meta.currentLessonId = next.id;
+      }
+      DataManager.save();
+      State.lessonId = null;
+      if (!nextT) { State.view = 'timetable'; State.timetableWeek = null; }
+      renderApp();
+      if (nextT) toast('✅ 打卡成功，已进入下一课'); else toast('🎉 本学期课程全部完成！');
+      break;
+    }
+
+    /* ---- 教学大纲 ---- */
+    case 'open-unit': State.unitId = el.dataset.unit; State.view = 'syllabusDetail'; renderApp(); break;
+    case 'open-syllabus': State.view = 'syllabus'; State.unitId = null; renderApp(); break;
+    case 'open-add-knowledge': openAddKnowledgeSheet(); break;
+    case 'new-knowledge': openNewKnowledgeSheet(); break;
+    case 'save-new-knowledge': {
+      const name = $('#nkName').value.trim();
+      if (!name) { toast('请填写知识点名称'); break; }
+      const item = { id: uid('k'), name: name, category: $('#nkCat').value, practices: [] };
+      d.knowledgeItems.push(item);
+      const unit = DataManager.getUnit(State.unitId);
+      unit.knowledgeIds.push(item.id);
+      DataManager.save(); closeSheet(); renderApp(); toast('已新建知识点'); break;
+    }
+    case 'pick-knowledge': {
+      const unit = DataManager.getUnit(State.unitId);
+      const kid = el.dataset.kid;
+      if (unit && !unit.knowledgeIds.includes(kid)) unit.knowledgeIds.push(kid);
+      DataManager.save(); closeSheet(); renderApp(); break;
+    }
+    case 'edit-knowledge': openEditKnowledgeSheet(el.dataset.kid); break;
+    case 'save-edit-knowledge': {
+      const k = DataManager.getKnowledge(el.dataset.kid);
+      if (!k) break;
+      k.name = $('#ekName').value.trim() || k.name;
+      k.category = $('#ekCat').value;
+      DataManager.save(); closeSheet(); renderApp(); toast('已保存'); break;
+    }
+    case 'unlink-knowledge': {
+      const unit = DataManager.getUnit(el.dataset.unit);
+      const kid = el.dataset.kid;
+      if (unit && confirm('确定将该知识点从本项目移除吗？（不会删除全局知识点库）')) {
+        unit.knowledgeIds = unit.knowledgeIds.filter(x => x !== kid);
+        unit.checkedKnowledgeIds = (unit.checkedKnowledgeIds || []).filter(x => x !== kid);
+        DataManager.save(); renderApp(); toast('已移除关联');
+      }
+      break;
+    }
+
+    /* ---- 课表 ---- */
+    case 'week-tab': State.timetableWeek = +el.dataset.week; renderApp(); break;
+    case 'open-lesson': State.tid = el.dataset.tid; State.view = 'lessonDetail'; renderApp(); break;
+    case 'open-timetable': State.view = 'timetable'; State.tid = null; renderApp(); break;
+    case 'edit-schedule': openScheduleEditSheet(el.dataset.tid); break;
+    case 'save-schedule': {
+      const t = DataManager.getTimetable(el.dataset.tid);
+      if (!t) break;
+      const week = parseInt($('#schWeek').value, 10);
+      const day = $('#schDay').value;
+      const period = parseInt($('#schPeriod').value, 10);
+      const slots = $('#schSlots').value;
+      const room = $('#schRoom').value.trim() || t.room;
+      if (!(week >= 1 && week <= 17) || !(period >= 1 && period <= 6)) { toast('请检查周次和节次'); break; }
+      t.week = week; t.day = day; t.period = period; t.periods = slots; t.room = room;
+      t.displayName = '第' + week + '周' + day + '第' + period + '节课';
+      DataManager.save(); closeSheet(); renderApp(); toast('调课已保存'); break;
+    }
+
+    /* ---- 知识看板 ---- */
+    case 'board-cat': State.boardCategory = el.dataset.cat; renderApp(); break;
+    case 'view-practices': {
+      const k = DataManager.getKnowledge(el.dataset.kid);
+      if (!k) break;
+      openSheet('练习记录 · ' + titleShort(k.name), (k.practices || []).map(p => `
+        <div class="card px-3 py-2 text-[16px]"><span class="text-[13px] text-stone-400">${fmtDT(p.timestamp)}</span><div class="mt-0.5">${esc(p.note || '（无备注）')}</div></div>`).join('') || '<div class="text-[15px] text-stone-400">暂无练习记录</div>');
+      break;
+    }
+
+    /* ---- 备注汇总 ---- */
+    case 'export-notes': {
+      const txt = collectNotes().map(n => `${fmtDT(n.ts)} ${n.label} ${n.text}`).join('\n');
+      const done = () => toast('已复制到剪贴板');
+      const fallback = () => {
+        const ta = document.createElement('textarea');
+        ta.value = txt; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) { toast('复制失败'); }
+        ta.remove();
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done).catch(fallback);
+      else fallback();
+      break;
+    }
+
+    /* ---- 学生档案 ---- */
+    case 'add-student': openStudentFormSheet(''); break;
+    case 'edit-student': openStudentFormSheet(el.dataset.sid); break;
+    case 'save-student': {
+      const no = $('#stuNo').value.trim(), name = $('#stuName').value.trim();
+      if (!no || !name) { toast('请填写学号和姓名'); break; }
+      const sid = el.dataset.sid;
+      if (sid) {
+        const s = d.students.find(x => x.id === sid);
+        if (s) { s.studentNo = no; s.name = name; }
+      } else {
+        d.students.push({ id: uid('s'), studentNo: no, name: name, records: [] });
+      }
+      DataManager.save(); closeSheet(); renderApp(); toast(sid ? '学生信息已更新' : '已添加学生'); break;
+    }
+    case 'delete-student': {
+      const sid = el.dataset.sid;
+      if (confirm('确定删除该学生吗？其全部档案记录将一并删除，不可恢复。')) {
+        d.students = d.students.filter(x => x.id !== sid);
+        State.selectedStudents.delete(sid);
+        if (State.studentId === sid) { State.studentId = null; State.studentUI = null; State.view = 'students'; }
+        DataManager.save(); renderApp(); toast('已删除');
+      }
+      break;
+    }
+    case 'open-student': State.studentId = el.dataset.sid; State.studentUI = null; State.view = 'studentDetail'; renderApp(); break;
+    case 'open-students': State.view = 'students'; State.studentId = null; renderApp(); break;
+    case 'export-students':
+      openSheet('导出选中学生', `
+        <div class="space-y-2">
+          <button data-action="do-export-md" class="w-full rounded-xl border border-stone-200 py-3 text-[16px]">Markdown（便于阅读）</button>
+          <button data-action="do-export-jsonl" class="w-full rounded-xl border border-stone-200 py-3 text-[16px]">JSONL（便于AI分析）</button>
+          <div class="text-[14px] text-stone-400 pt-1">未勾选任何学生时默认导出全部。</div>
+        </div>`);
+      break;
+    case 'do-export-md': {
+      const txt = buildExport('md');
+      downloadText('学生档案_' + new Date().toISOString().slice(0, 10) + '.md', txt, 'text/markdown;charset=utf-8');
+      closeSheet(); toast('已导出 Markdown'); break;
+    }
+    case 'do-export-jsonl': {
+      const txt = buildExport('jsonl');
+      downloadText('学生档案_' + new Date().toISOString().slice(0, 10) + '.jsonl', txt, 'application/jsonl;charset=utf-8');
+      closeSheet(); toast('已导出 JSONL'); break;
+    }
+    case 'set-evaluation': syncStudentInputs(); studentUI().evaluation = el.dataset.val; renderApp(); break;
+    case 'toggle-issue': {
+      syncStudentInputs(); const ui = studentUI(); const v = el.dataset.val;
+      if (ui.issues.has(v)) ui.issues.delete(v); else ui.issues.add(v);
+      renderApp(); break;
+    }
+    case 'add-issue': {
+      syncStudentInputs(); const ui = studentUI(); const v = ui.newIssue || '';
+      if (v && !(d.meta.coreIssueOptions || []).includes(v)) d.meta.coreIssueOptions.push(v);
+      if (v) ui.issues.add(v);
+      ui.newIssue = ''; DataManager.save(); renderApp(); break;
+    }
+    case 'submit-evaluation': {
+      syncStudentInputs(); const ui = studentUI();
+      const s = d.students.find(x => x.id === State.studentId);
+      if (!s) break;
+      if (!ui.evaluation && ui.issues.size === 0) { toast('请至少选择总体评价或核心问题'); break; }
+      s.records.push({ type: 'evaluation', evaluation: ui.evaluation, coreIssues: [...ui.issues], timestamp: new Date().toISOString() });
+      State.studentUI = null; DataManager.save(); renderApp(); toast('已记录'); break;
+    }
+    case 'toggle-tag': {
+      syncStudentInputs(); const ui = studentUI(); const v = el.dataset.val;
+      if (ui.tags.has(v)) ui.tags.delete(v); else ui.tags.add(v);
+      renderApp(); break;
+    }
+    case 'add-tag': {
+      syncStudentInputs(); const ui = studentUI(); const v = ui.newTag || '';
+      if (v && !(d.meta.customTags || []).includes(v)) d.meta.customTags.push(v);
+      if (v) ui.tags.add(v);
+      ui.newTag = ''; DataManager.save(); renderApp(); break;
+    }
+    case 'set-status': syncStudentInputs(); studentUI().status = el.dataset.val; renderApp(); break;
+    case 'save-quick': {
+      syncStudentInputs(); const ui = studentUI();
+      const s = d.students.find(x => x.id === State.studentId);
+      if (!s) break;
+      if (ui.tags.size === 0 && !ui.status && !(ui.memo || '').trim()) { toast('请至少填写一项'); break; }
+      s.records.push({ type: 'quick', tags: [...ui.tags], status: ui.status, memo: (ui.memo || '').trim(), timestamp: new Date().toISOString() });
+      State.studentUI = null; DataManager.save(); renderApp(); toast('已保存'); break;
+    }
+
+    /* ---- 备份/恢复 ---- */
+    case 'backup-export': {
+      const blob = new Blob([JSON.stringify(DataManager.data, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = '教学备份_' + new Date().toISOString().slice(0, 10) + '.json';
+      document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 200);
+      toast('备份已导出');
+      break;
+    }
+    case 'backup-import': $('#importFile').click(); break;
+    case 'clear-data':
+      openSheet('清空数据', `
+        <div class="text-[15px] text-stone-500 leading-relaxed">此操作将<b class="text-red-500">永久删除</b>全部打卡记录、备注、作业、学生档案与设置，并恢复为全新初始状态，<b>不可恢复</b>。</div>
+        <div class="text-[14px] text-stone-400 mt-1">建议先点击侧边栏"💾 导出备份"保存一份再清空。</div>
+        <div class="flex gap-2 mt-4">
+          <button data-action="close-sheet" class="flex-1 rounded-xl border border-stone-200 py-3 text-[15px]">取消</button>
+          <button data-action="clear-data-confirm" class="flex-1 rounded-xl bg-red-500 text-white py-3 text-[15px] font-medium">我已知晓，继续</button>
+        </div>`);
+      break;
+    case 'clear-data-confirm':
+      if (confirm('再次确认：确定清空全部数据吗？此操作不可撤销。')) {
+        localStorage.removeItem(STORAGE_KEY);
+        DataManager.data = null;
+        DataManager.load();
+        DataManager.save();
+        State.lessonId = null; State.unitId = null; State.tid = null; State.timetableWeek = null;
+        State.studentId = null; State.studentUI = null; State.selectedStudents = new Set(); State.boardCategory = '发音';
+        closeSheet(); renderApp(); toast('数据已清空，已恢复初始状态');
+      }
+      break;
+    case 'close-sheet': closeSheet(); break;
+  }
+}
+
+/* ============================================================
+ * 事件绑定
+ * ============================================================ */
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  handleAction(el.dataset.action, el);
+});
+document.addEventListener('change', e => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const action = el.dataset.action;
+  if (action === 'unit-change') {
+    const lesson = DataManager.getLessonById(el.dataset.lesson);
+    if (lesson && !lesson.completed) {
+      lesson.unitId = el.value;
+      lesson.checkedKnowledgeIds = [];
+      DataManager.save(); renderApp();
+    }
+  } else if (action === 'select-student') {
+    const sid = el.dataset.sid;
+    if (e.target.checked) State.selectedStudents.add(sid); else State.selectedStudents.delete(sid);
+    renderApp();
+  } else if (action === 'select-all') {
+    if (e.target.checked) DataManager.data.students.forEach(s => State.selectedStudents.add(s.id));
+    else State.selectedStudents.clear();
+    renderApp();
+  }
+});
+$('#importFile').addEventListener('change', e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const data = JSON.parse(r.result);
+      if (!data.timetable || !data.syllabus) throw new Error('bad format');
+      const isFullBackup = Array.isArray(data.lessons) && Array.isArray(data.students) && data.meta;
+      if (isFullBackup) {
+        // 完整备份：整体恢复
+        DataManager.data = data;
+      } else {
+        // 更新包：仅替换基础数据（课表/大纲/知识点），保留课程打卡与学生记录
+        DataManager.data.timetable = data.timetable;
+        DataManager.data.syllabus = data.syllabus;
+        DataManager.data.knowledgeItems = data.knowledgeItems;
+        const kIds = new Set(data.knowledgeItems.map(k => k.id));
+        DataManager.data.syllabus.forEach(u => {
+          u.knowledgeIds = (u.knowledgeIds || []).filter(id => kIds.has(id));
+          u.checkedKnowledgeIds = (u.checkedKnowledgeIds || []).filter(id => kIds.has(id));
+        });
+        DataManager.data.lessons.forEach(l => { l.checkedKnowledgeIds = (l.checkedKnowledgeIds || []).filter(id => kIds.has(id)); });
+      }
+      DataManager.ensure();
+      DataManager.save();
+      State.lessonId = null; State.unitId = null; State.tid = null; State.studentId = null; State.studentUI = null; State.selectedStudents.clear();
+      renderApp(); toast(isFullBackup ? '导入成功（完整恢复）' : '已应用数据更新，进度已保留');
+    } catch (err) { toast('导入失败：文件格式不正确'); }
+  };
+  r.readAsText(f);
+  e.target.value = '';
+});
+
+/* ============================================================
+ * 启动
+ * ============================================================ */
+DataManager.load();
+renderApp();
+
+/* PWA：离线缓存（仅 https 环境下生效，本地 file:// 自动忽略） */
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
