@@ -20,6 +20,47 @@ function catColor(c) { return ({'发音':'bg-sky-100 text-sky-700','语法':'bg-
 const EVAL_EMOJI = { '头部': '🟢', '中等': '🟡', '末尾': '🔴' };
 
 /* ============================================================
+ * 课表辅助：日期 / 排序 / 预设单元 / 被冲掉处理
+ * ============================================================ */
+const DOW_ORDER = { '周一': 1, '周二': 2, '周三': 3, '周四': 4, '周五': 5, '周六': 6, '周日': 7 };
+function dateMD(week, day) {
+  const start = new Date((DataManager.data.meta.semesterStart || '2026-09-07') + 'T00:00:00');
+  const d = new Date(start.getTime() + (week - 1) * 7 * 86400000 + (DOW_ORDER[day] - 1) * 86400000);
+  return (d.getMonth() + 1) + '.' + d.getDate();
+}
+function sortedTimetable() {
+  return [...DataManager.data.timetable].sort((a, b) =>
+    (a.week - b.week) || (DOW_ORDER[a.day] - DOW_ORDER[b.day]) || (a.period - b.period));
+}
+function checkableList() { return sortedTimetable().filter(t => !t.cancelled); }
+function nextTimetableAfter(tid) {
+  const arr = checkableList();
+  const i = arr.findIndex(t => t.id === tid);
+  return i >= 0 ? arr[i + 1] : null;
+}
+function prevTimetableBefore(tid) {
+  const arr = checkableList();
+  const i = arr.findIndex(t => t.id === tid);
+  return i > 0 ? arr[i - 1] : null;
+}
+function seqInWeek(t) {
+  return checkableList().filter(x => x.week === t.week).findIndex(x => x.id === t.id) + 1;
+}
+/* 预设课程进度：按新节奏模型，周次 -> 默认教学项目
+ * 第9周：前2大节归 S8（部分冠词），其余归期中复习 */
+const WEEK_UNIT_DEFAULT = {
+  2: 'u1', 3: 'u2', 4: 'u3', 5: 'u4', 6: 'u5', 7: 'u6', 8: 'u7',
+  9: 'u8', 10: 'u8', 11: 'u9', 12: 'u10', 13: 'u11', 14: 'u12', 15: 'u13', 16: 'u14', 17: 'review_final'
+};
+function presetUnitFor(t) {
+  const base = WEEK_UNIT_DEFAULT[t.week];
+  if (base === undefined) return t.week >= 18 ? 'review_final' : '';
+  if (t.week === 9) return seqInWeek(t) <= 2 ? 'u8' : 'review_mid';
+  return base;
+}
+function tDisplay(t) { return t ? (t.displayName || ('第' + t.week + '周' + t.day + ' 第' + t.period + '大节')) : ''; }
+
+/* ============================================================
  * 数据管理（唯一入口，所有读写经由此对象）
  * ============================================================ */
 const STORAGE_KEY = 'teaching_workbench_v1';
@@ -46,17 +87,19 @@ const DataManager = {
   ensure() {
     const d = this.data;
     if (!d.meta) d.meta = clone(meta);
-    d.meta.totalLessons = d.timetable.length;
+    d.meta.totalLessons = checkableList().length;
     if (!Array.isArray(d.lessons)) d.lessons = [];
     if (!d.lessons.length) {
+      const firstT = checkableList()[0];
       d.lessons.push({
-        id: 'l1', timetableId: d.timetable[0].id, unitId: d.syllabus[0].id,
+        id: 'l1', timetableId: firstT ? firstT.id : (d.timetable[0] || {}).id, unitId: d.syllabus[0].id,
         checkedKnowledgeIds: [], completed: false, completedAt: null,
         memo: '', memoAt: null, homework: []
       });
     }
     if (!d.meta.currentLessonId || !d.lessons.some(l => l.id === d.meta.currentLessonId)) d.meta.currentLessonId = d.lessons[0].id;
   },
+  recalc() { if (this.data && this.data.meta) this.data.meta.totalLessons = checkableList().length; },
   getTimetable(id) { return this.data.timetable.find(t => t.id === id); },
   getUnit(id) { return this.data.syllabus.find(u => u.id === id); },
   getKnowledge(id) { return this.data.knowledgeItems.find(k => k.id === id); },
@@ -208,7 +251,7 @@ function renderProgress() {
   const unit = DataManager.getUnit(lesson.unitId);
   const readonly = !!lesson.completed;
   const isCurrent = lesson.id === d.meta.currentLessonId;
-  const tIdx = DataManager.timetableIndex(lesson.timetableId);
+  const tIdx = checkableList().findIndex(x => x.id === lesson.timetableId);
   const allDone = done >= total;
 
   const knowledgeRows = unit.knowledgeIds.map(kid => {
@@ -241,19 +284,20 @@ function renderProgress() {
     <header class="sticky top-0 z-30 bg-[#F7F6F3]/95 backdrop-blur px-4 pt-3 pb-2">
       <div class="flex items-center gap-2 mb-2">
         <button data-action="open-sidebar" class="w-9 h-9 rounded-xl bg-white border border-stone-200/70 shadow-sm text-lg">☰</button>
-        <div class="flex-1 text-[17px] font-medium">👩‍🏫 总进度：<span class="font-bold">${done}/${total}</span>课</div>
+        <div class="flex-1 text-[17px] font-medium">👩‍🏫 总进度：<span class="font-bold">${done}/${total}</span>大节</div>
         <div class="text-xs text-stone-400">${pct}%</div>
       </div>
       <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
     </header>
     <div class="px-4 pt-3 space-y-3">
-      ${allDone ? `<div class="card px-4 py-3 bg-amber-50 border-amber-200 text-amber-700 text-sm font-medium">🎉 全部 ${total} 节课已完成！</div>` : ''}
+      ${allDone ? `<div class="card px-4 py-3 bg-amber-50 border-amber-200 text-amber-700 text-sm font-medium">🎉 全部 ${total} 大节已完成！</div>` : ''}
       <div class="card px-3 py-3">
         <div class="flex items-center gap-2">
           <button data-action="prev-lesson" class="w-8 h-8 shrink-0 flex items-center justify-center rounded-lg border border-stone-200 text-stone-500 ${tIdx <= 0 ? 'opacity-30 pointer-events-none' : ''}">◀</button>
           <div class="flex-1 min-w-0 text-[16px] leading-tight">
             <div class="font-semibold">${t.displayName}</div>
             <div class="text-xs text-stone-400 mt-0.5">${t.room} · ${t.periods}</div>
+            ${t.originalNote ? `<div class="text-xs text-amber-600 mt-0.5">📌 ${esc(t.originalNote)}</div>` : ''}
           </div>
         </div>
         <div class="mt-2 flex items-center gap-2">
@@ -381,30 +425,35 @@ function renderTimetable() {
   const d = DataManager.data;
   const allDone = DataManager.completedCount() >= d.meta.totalLessons;
   const cur = DataManager.currentLesson();
-  const curWeek = cur ? DataManager.getTimetable(cur.timetableId).week : 1;
+  const curWeek = cur ? DataManager.getTimetable(cur.timetableId).week : 2;
   const week = State.timetableWeek || curWeek;
-  const weeks = [...new Set(d.timetable.map(t => t.week))];
-  const days = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  const weeks = [...new Set(d.timetable.map(t => t.week))].sort((a, b) => a - b);
+  const days = Object.keys(DOW_ORDER);
   const byDay = {};
   d.timetable.filter(t => t.week === week).forEach(t => { (byDay[t.day] = byDay[t.day] || []).push(t); });
   const body = `
-    ${allDone ? `<div class="card px-4 py-3 bg-amber-50 border-amber-200 text-amber-700 text-sm font-medium">🎉 全部 ${d.meta.totalLessons} 节课已完成！</div>` : ''}
+    <button data-action="add-course" class="w-full rounded-xl border border-dashed border-stone-300 py-2.5 text-[15px] text-stone-500">＋ 添加课程（补课 / 调课 / 第18周期末测评）</button>
+    ${allDone ? `<div class="card px-4 py-3 bg-amber-50 border-amber-200 text-amber-700 text-sm font-medium">🎉 全部 ${d.meta.totalLessons} 大节已完成！</div>` : ''}
     <div class="flex flex-wrap gap-1.5">
       ${weeks.map(w => `<button data-action="week-tab" data-week="${w}" class="px-3 py-1.5 rounded-full text-[14px] ${w === week ? 'bg-[#37352F] text-white font-medium' : 'bg-white border border-stone-200 text-stone-500'}">第${w}周</button>`).join('')}
     </div>
     ${days.map(day => {
-      const ts = byDay[day] || [];
+      const ts = (byDay[day] || []).sort((a, b) => a.period - b.period);
       if (!ts.length) return '';
       return `<div><div class="text-[15px] font-semibold text-stone-500 mt-3 mb-1">${day}</div>
         <div class="space-y-1.5">${ts.map(t => {
           const l = DataManager.getLessonByTimetable(t.id);
           const u = l ? DataManager.getUnit(l.unitId) : null;
           const done = !!(l && l.completed);
-          return `<div class="w-full card px-3 py-2.5 flex items-center gap-2">
+          return `<div class="w-full card px-3 py-2.5 flex items-center gap-2 ${t.cancelled ? 'bg-stone-50' : ''}">
             <button data-action="open-lesson" data-tid="${t.id}" class="flex-1 min-w-0 text-left">
-              <span class="w-2.5 h-2.5 inline-block rounded-full ${done ? 'bg-emerald-500' : 'bg-stone-300'} mr-1"></span>
-              <span class="text-[16px] font-medium leading-snug">${t.day} 第${t.period}节 · ${u ? esc(titleShort(u.title)) : '未开始'}</span>
-              <span class="block text-[13px] text-stone-400 mt-0.5">${t.room} · ${t.periods}${done ? ' · ✅ ' + fmtDT(l.completedAt) : ''}</span>
+              <span class="flex items-center gap-1.5">
+                <span class="w-2.5 h-2.5 inline-block rounded-full shrink-0 ${t.cancelled ? 'bg-red-400' : done ? 'bg-emerald-500' : 'bg-stone-300'}"></span>
+                <span class="text-[16px] font-medium leading-snug">${t.displayName}</span>
+              </span>
+              <span class="block text-[13px] text-stone-400 mt-0.5">${t.room} · ${t.periods} · ${u ? esc(titleShort(u.title)) : '未开始'}${done ? ' · ✅ ' + fmtDT(l.completedAt) : ''}</span>
+              ${t.cancelled ? `<span class="inline-block mt-1 rounded-md bg-red-100 text-red-600 text-[13px] px-2 py-0.5 font-medium">🚫 被冲掉（禁打卡）</span>` : ''}
+              ${t.originalNote ? `<span class="block text-[13px] text-amber-600 mt-0.5">📌 ${esc(t.originalNote)}</span>` : ''}
             </button>
             <button data-action="edit-schedule" data-tid="${t.id}" class="w-7 h-7 shrink-0 flex items-center justify-center rounded-lg border border-stone-200 text-stone-400 text-[15px]">✏️</button>
           </div>`;
@@ -416,25 +465,60 @@ function renderTimetable() {
 function openScheduleEditSheet(tid) {
   const t = DataManager.getTimetable(tid);
   if (!t) return;
-  const days = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-  openSheet('调课 / 修改时间', `
+  const days = Object.keys(DOW_ORDER);
+  const hasRecord = !!DataManager.getLessonByTimetable(tid);
+  openSheet('课程设置（调课 / 状态）', `
     <div class="space-y-3">
       <div class="grid grid-cols-2 gap-2">
         <div><label class="text-[15px] text-stone-500">周次</label>
-          <input id="schWeek" type="number" min="1" max="17" value="${t.week}" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none"></div>
+          <input id="schWeek" type="number" min="1" max="30" value="${t.week}" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none"></div>
         <div><label class="text-[15px] text-stone-500">星期</label>
           <select id="schDay" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">${days.map(d => `<option ${d === t.day ? 'selected' : ''}>${d}</option>`).join('')}</select></div>
       </div>
       <div class="grid grid-cols-2 gap-2">
-        <div><label class="text-[15px] text-stone-500">当日第几节</label>
+        <div><label class="text-[15px] text-stone-500">当日第几大节</label>
           <input id="schPeriod" type="number" min="1" max="6" value="${t.period}" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none"></div>
         <div><label class="text-[15px] text-stone-500">节次</label>
           <select id="schSlots" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">${['1-2节', '3-4节', '5-6节', '7-8节', '9-10节'].map(x => `<option ${x === t.periods ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
       </div>
       <div><label class="text-[15px] text-stone-500">教室</label>
         <input id="schRoom" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none" value="${esc(t.room)}"></div>
-      <div class="text-[14px] text-stone-400">调课后课表将按新时间显示；打卡推进顺序仍按原课程顺序。</div>
+      <div class="grid grid-cols-2 gap-2">
+        <div><label class="text-[15px] text-stone-500">状态</label>
+          <select id="schStatus" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">
+            <option ${!t.cancelled ? 'selected' : ''}>正常</option>
+            <option ${t.cancelled ? 'selected' : ''}>被冲掉</option>
+          </select></div>
+      </div>
+      <div><label class="text-[15px] text-stone-500">备注（如"原课程：第3周周五9.25"）</label>
+        <input id="schNote" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none" value="${esc(t.originalNote || '')}" placeholder="留空则无备注"></div>
+      <div class="text-[14px] text-stone-400">保存后课表按新时间显示并自动算日期；"被冲掉"的课禁打卡、不计入总进度。${hasRecord ? '⚠️ 该课已有打卡记录，不能改为被冲掉。' : ''}</div>
       <button data-action="save-schedule" data-tid="${tid}" class="w-full rounded-xl bg-[#37352F] text-white py-3 text-[16px] font-medium">保存</button>
+      ${hasRecord ? '' : `<button data-action="delete-course" data-tid="${tid}" class="w-full rounded-xl border border-red-200 text-red-500 py-3 text-[16px]">删除此课程</button>`}
+    </div>`);
+}
+
+function openAddCourseSheet() {
+  const days = Object.keys(DOW_ORDER);
+  openSheet('添加课程', `
+    <div class="space-y-3">
+      <div class="grid grid-cols-2 gap-2">
+        <div><label class="text-[15px] text-stone-500">周次</label>
+          <input id="acWeek" type="number" min="1" max="30" value="18" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none"></div>
+        <div><label class="text-[15px] text-stone-500">星期</label>
+          <select id="acDay" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">${days.map(d => `<option>${d}</option>`).join('')}</select></div>
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div><label class="text-[15px] text-stone-500">当日第几大节</label>
+          <input id="acPeriod" type="number" min="1" max="6" value="1" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none"></div>
+        <div><label class="text-[15px] text-stone-500">节次</label>
+          <select id="acSlots" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">${['1-2节', '3-4节', '5-6节', '7-8节', '9-10节'].map(x => `<option ${x === '3-4节' ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+      </div>
+      <div><label class="text-[15px] text-stone-500">教室</label>
+        <input id="acRoom" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none" value="叶耀珍楼407"></div>
+      <div><label class="text-[15px] text-stone-500">备注（可写"期末测评"或"原课程：…"）</label>
+        <input id="acNote" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none" placeholder="选填"></div>
+      <button data-action="save-course" class="w-full rounded-xl bg-[#37352F] text-white py-3 text-[16px] font-medium">添加</button>
     </div>`);
 }
 
@@ -457,8 +541,10 @@ function renderLessonDetail() {
       <div class="text-[17px] font-semibold">${t.displayName}</div>
       <div class="text-[15px] text-stone-500">${t.room} · ${t.periods}</div>
       <div class="text-[15px] text-stone-500">${u ? unitAbbr(u) + ' ' + esc(titleShort(u.title)) : '未关联教学项目'}</div>
-      <div class="text-[15px] ${done ? 'text-emerald-600' : 'text-stone-400'}">${done ? '✅ 已打卡 ' + fmtDT(l.completedAt) : '⚪ 未打卡'}</div>
+      ${t.originalNote ? `<div class="text-[15px] text-amber-600">📌 ${esc(t.originalNote)}</div>` : ''}
+      <div class="text-[15px] ${t.cancelled ? 'text-red-500 font-medium' : done ? 'text-emerald-600' : 'text-stone-400'}">${t.cancelled ? '🚫 被冲掉（禁打卡）' : done ? '✅ 已打卡 ' + fmtDT(l.completedAt) : '⚪ 未打卡'}</div>
     </div>
+    ${t.cancelled ? `<div class="card px-4 py-3 bg-red-50 border-red-200 text-red-600 text-[15px] leading-relaxed">本节因节日 / 活动被冲掉，不参与打卡，也不计入总进度。若学校临时补课，可在课表点 ✏️ 恢复为正常，或另行"添加课程"。</div>` : ''}
     <div class="text-[16px] font-semibold pt-1">知识点完成情况</div>
     <div class="space-y-1.5">${rows}</div>
     ${l && l.memo ? `<div class="text-[16px] font-semibold pt-1">备注</div><div class="card px-3 py-2 text-[16px]">${esc(l.memo)}<div class="text-[13px] text-stone-400 mt-1">${fmtDT(l.memoAt)}</div></div>` : ''}
@@ -692,10 +778,12 @@ function handleAction(action, el) {
     /* ---- 教学进度 ---- */
     case 'prev-lesson': {
       const cur = DataManager.currentLesson();
-      const ti = DataManager.timetableIndex(cur.timetableId);
-      if (ti > 0) {
-        const prev = DataManager.getLessonByTimetable(d.timetable[ti - 1].id);
-        if (prev) { State.lessonId = prev.id; renderApp(); }
+      const arr = checkableList();
+      let i = arr.findIndex(x => x.id === cur.timetableId);
+      while (i > 0) {
+        i -= 1;
+        const prev = DataManager.getLessonByTimetable(arr[i].id);
+        if (prev) { State.lessonId = prev.id; renderApp(); break; }
       }
       break;
     }
@@ -754,12 +842,11 @@ function handleAction(action, el) {
       if (unit.knowledgeIds.every(kid => unit.checkedKnowledgeIds.includes(kid))) {
         unit.completed = true; unit.completedAt = new Date().toISOString();
       }
-      const ti = DataManager.timetableIndex(lesson.timetableId);
-      const nextT = d.timetable[ti + 1];
+      const nextT = nextTimetableAfter(lesson.timetableId);
       if (nextT) {
         let next = DataManager.getLessonByTimetable(nextT.id);
         if (!next) {
-          next = { id: uid('l'), timetableId: nextT.id, unitId: unit.id, checkedKnowledgeIds: [], completed: false, completedAt: null, memo: '', memoAt: null, homework: [] };
+          next = { id: uid('l'), timetableId: nextT.id, unitId: presetUnitFor(nextT) || unit.id, checkedKnowledgeIds: [], completed: false, completedAt: null, memo: '', memoAt: null, homework: [] };
           d.lessons.push(next);
         }
         d.meta.currentLessonId = next.id;
@@ -824,10 +911,41 @@ function handleAction(action, el) {
       const period = parseInt($('#schPeriod').value, 10);
       const slots = $('#schSlots').value;
       const room = $('#schRoom').value.trim() || t.room;
-      if (!(week >= 1 && week <= 17) || !(period >= 1 && period <= 6)) { toast('请检查周次和节次'); break; }
+      const status = $('#schStatus').value;
+      const note = $('#schNote').value.trim();
+      if (!(week >= 1 && week <= 30) || !(period >= 1 && period <= 6)) { toast('请检查周次和大节'); break; }
+      const wantCancel = status === '被冲掉';
+      if (wantCancel && DataManager.getLessonByTimetable(t.id)) { toast('该课已有打卡记录，不能设为被冲掉'); break; }
       t.week = week; t.day = day; t.period = period; t.periods = slots; t.room = room;
-      t.displayName = '第' + week + '周' + day + '第' + period + '节课';
-      DataManager.save(); closeSheet(); renderApp(); toast('调课已保存'); break;
+      t.cancelled = wantCancel;
+      t.originalNote = note || null;
+      t.displayName = '第' + week + '周' + day + '(' + dateMD(week, day) + ') 第' + period + '大节';
+      DataManager.recalc(); DataManager.save(); closeSheet(); renderApp(); toast('已保存'); break;
+    }
+    case 'add-course': openAddCourseSheet(); break;
+    case 'save-course': {
+      const week = parseInt($('#acWeek').value, 10);
+      const day = $('#acDay').value;
+      const period = parseInt($('#acPeriod').value, 10);
+      const slots = $('#acSlots').value;
+      const room = $('#acRoom').value.trim() || '叶耀珍楼407';
+      const note = $('#acNote').value.trim();
+      if (!(week >= 1 && week <= 30) || !(period >= 1 && period <= 6)) { toast('请检查周次和大节'); break; }
+      const item = { id: uid('t'), week: week, day: day, period: period,
+        displayName: '第' + week + '周' + day + '(' + dateMD(week, day) + ') 第' + period + '大节',
+        room: room, periods: slots, cancelled: false, originalNote: note || null };
+      DataManager.data.timetable.push(item);
+      DataManager.recalc(); DataManager.save(); closeSheet(); renderApp(); toast('已添加课程'); break;
+    }
+    case 'delete-course': {
+      const t = DataManager.getTimetable(el.dataset.tid);
+      if (!t) break;
+      if (DataManager.getLessonByTimetable(t.id)) { toast('该课已有记录，不能删除；可改为被冲掉'); break; }
+      if (confirm('确定删除这一课程吗？（该课还没有打卡记录）')) {
+        DataManager.data.timetable = DataManager.data.timetable.filter(x => x.id !== t.id);
+        DataManager.recalc(); DataManager.save(); renderApp(); toast('已删除');
+      }
+      break;
     }
 
     /* ---- 知识看板 ---- */
