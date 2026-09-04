@@ -6,7 +6,7 @@
  * 工具函数
  * ============================================================ */
 const $ = s => document.querySelector(s);
-const CATS = ['发音', '语法', '交际', '词汇', '课文精读'];
+const CATS = ['语音', '语法', '交际', '词汇', 'Lecture', '其他'];
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function clone(o) { return JSON.parse(JSON.stringify(o)); }
 function uid(p) { return p + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
@@ -16,7 +16,7 @@ function fmtDateCN(iso) { const d = new Date(iso); return d.getFullYear() + '年
 function fmtTime(iso) { const d = new Date(iso); return pad(d.getHours()) + ':' + pad(d.getMinutes()); }
 function unitAbbr(u) { if (!u) return ''; if (u.id === 'review_mid') return '期中'; if (u.id === 'review_final') return '期末'; return u.id.toUpperCase(); }
 function titleShort(t) { return String(t || '').split(/[（(]/)[0].trim(); }
-function catColor(c) { return ({'发音':'bg-sky-100 text-sky-700','语法':'bg-violet-100 text-violet-700','交际':'bg-amber-100 text-amber-700','词汇':'bg-emerald-100 text-emerald-700','课文精读':'bg-rose-100 text-rose-700'}[c]) || 'bg-stone-100 text-stone-600'; }
+function catColor(c) { return ({'语音':'bg-sky-100 text-sky-700','语法':'bg-violet-100 text-violet-700','交际':'bg-amber-100 text-amber-700','词汇':'bg-emerald-100 text-emerald-700','Lecture':'bg-rose-100 text-rose-700','其他':'bg-stone-100 text-stone-600'}[c]) || 'bg-stone-100 text-stone-600'; }
 const EVAL_EMOJI = { '头部': '🟢', '中等': '🟡', '末尾': '🔴' };
 
 /* ============================================================
@@ -46,16 +46,15 @@ function prevTimetableBefore(tid) {
 function seqInWeek(t) {
   return checkableList().filter(x => x.week === t.week).findIndex(x => x.id === t.id) + 1;
 }
-/* 预设课程进度：按新节奏模型，周次 -> 默认教学项目
- * 第9周：前2大节归 S8（部分冠词），其余归期中复习 */
+/* 预设课程进度：周次 -> 默认教学项目
+ * 2-8周=U1-U7；9周=期中；10周=U8；11-16周=U9-U14；17周=期末 */
 const WEEK_UNIT_DEFAULT = {
   2: 'u1', 3: 'u2', 4: 'u3', 5: 'u4', 6: 'u5', 7: 'u6', 8: 'u7',
-  9: 'u8', 10: 'u8', 11: 'u9', 12: 'u10', 13: 'u11', 14: 'u12', 15: 'u13', 16: 'u14', 17: 'review_final'
+  9: 'review_mid', 10: 'u8', 11: 'u9', 12: 'u10', 13: 'u11', 14: 'u12', 15: 'u13', 16: 'u14', 17: 'review_final'
 };
 function presetUnitFor(t) {
   const base = WEEK_UNIT_DEFAULT[t.week];
   if (base === undefined) return t.week >= 18 ? 'review_final' : '';
-  if (t.week === 9) return seqInWeek(t) <= 2 ? 'u8' : 'review_mid';
   return base;
 }
 function tDisplay(t) { return t ? (t.displayName || ('第' + t.week + '周' + t.day + ' 第' + t.period + '大节')) : ''; }
@@ -121,7 +120,7 @@ const State = {
   tid: null,
   timetableWeek: null,
   studentId: null,
-  boardCategory: '发音',
+  boardCategory: CATS[0],
   selectedStudents: new Set(),
   studentUI: null
 };
@@ -213,6 +212,7 @@ function renderApp() {
             </button>`).join('')}
         </nav>
         <div class="mt-6 pt-4 border-t border-stone-100 space-y-1">
+          <button data-action="export-progress-csv" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[17px] text-stone-600 hover:bg-[#F7F6F3]"><span class="text-lg">📤</span>导出课程进度表</button>
           <button data-action="backup-export" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[17px] text-stone-600 hover:bg-[#F7F6F3]"><span class="text-lg">💾</span>导出备份</button>
           <button data-action="backup-import" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[17px] text-stone-600 hover:bg-[#F7F6F3]"><span class="text-lg">📥</span>导入备份</button>
           <button data-action="clear-data" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[17px] text-red-500 hover:bg-red-50"><span class="text-lg">🗑️</span>清空数据</button>
@@ -359,7 +359,7 @@ function renderSyllabus() {
         <span class="text-stone-300">›</span>
       </button>`;
   }).join('');
-  return pageShell('📖 教学大纲', rows + `<div class="text-[13px] text-stone-400 px-2 pt-1">数据源：Corpus/FLE · 可配合《教学大纲与知识点.md》修改</div>`);
+  return pageShell('📖 教学大纲', rows + `<div class="text-[13px] text-stone-400 px-2 pt-1">数据源：《教学大纲与知识点-整理清单.md》</div>`);
 }
 
 function renderSyllabusDetail() {
@@ -431,12 +431,16 @@ function renderTimetable() {
   const days = Object.keys(DOW_ORDER);
   const byDay = {};
   d.timetable.filter(t => t.week === week).forEach(t => { (byDay[t.day] = byDay[t.day] || []).push(t); });
+  const weekItems = d.timetable.filter(t => t.week === week);
+  const weekDoable = weekItems.filter(t => !t.cancelled).length;
+  const weekCancelled = weekItems.length - weekDoable;
   const body = `
-    <button data-action="add-course" class="w-full rounded-xl border border-dashed border-stone-300 py-2.5 text-[15px] text-stone-500">＋ 添加课程（补课 / 调课 / 第18周期末测评）</button>
+    <button data-action="add-course" class="w-full rounded-xl border border-dashed border-stone-300 py-2.5 text-[15px] text-stone-500">+ 添加课程</button>
     ${allDone ? `<div class="card px-4 py-3 bg-amber-50 border-amber-200 text-amber-700 text-sm font-medium">🎉 全部 ${d.meta.totalLessons} 大节已完成！</div>` : ''}
     <div class="flex flex-wrap gap-1.5">
-      ${weeks.map(w => `<button data-action="week-tab" data-week="${w}" class="px-3 py-1.5 rounded-full text-[14px] ${w === week ? 'bg-[#37352F] text-white font-medium' : 'bg-white border border-stone-200 text-stone-500'}">第${w}周</button>`).join('')}
+      ${weeks.map(w => `<button data-action="week-tab" data-week="${w}" style="width:52px" class="h-8 rounded-lg text-[14px] flex items-center justify-center ${w === week ? 'bg-[#37352F] text-white font-medium' : 'bg-white border border-stone-200 text-stone-500'}">第${w}周</button>`).join('')}
     </div>
+    <div class="text-[14px] text-stone-500 mt-2 mb-0.5 px-0.5">第${week}周 共${weekDoable}大节${weekCancelled ? ` <span class="text-stone-400">（另有 ${weekCancelled} 大节被冲掉）</span>` : ''}</div>
     ${days.map(day => {
       const ts = (byDay[day] || []).sort((a, b) => a.period - b.period);
       if (!ts.length) return '';
@@ -460,6 +464,67 @@ function renderTimetable() {
         }).join('')}</div></div>`;
     }).join('')}`;
   return pageShell('📅 课表安排', body);
+}
+
+/* ---- 课程进度表导出（CSV）---- */
+const CANCELLED_REASON = { '10.1': '国庆节', '10.6': '国庆节', '10.7': '国庆节', '10.29': '运动会', '10.30': '运动会', '1.1': '元旦' };
+function dateFull(week, day) {
+  const start = new Date((DataManager.data.meta.semesterStart || '2026-09-07') + 'T00:00:00');
+  const d = new Date(start.getTime() + (week - 1) * 7 * 86400000 + (DOW_ORDER[day] - 1) * 86400000);
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+function scheduleNoteOf(t) {
+  if (t.cancelled) return CANCELLED_REASON[dateMD(t.week, t.day)] || '被冲掉';
+  if (!t.originalNote) return '';
+  if (/^原课程/.test(t.originalNote)) {
+    const m = t.originalNote.match(/(\d{1,2}\.\d{1,2})/);
+    return '替代' + (m ? m[1] : t.originalNote.replace(/^原课程[:：]\s*/, ''));
+  }
+  return t.originalNote;
+}
+function csvCell(v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; }
+function buildScheduleProgressCsv() {
+  const d = DataManager.data;
+  const order = sortedTimetable();
+  const groups = [];
+  const index = new Map();
+  order.forEach(t => {
+    const key = t.week + '|' + t.day;
+    if (!index.has(key)) { index.set(key, groups.length); groups.push([]); }
+    groups[index.get(key)].push(t);
+  });
+  const rows = [['周次', '日期', '课时数', '教学内容', '作业', '备注', '其他备注']];
+  groups.forEach(g => {
+    g.sort((a, b) => a.period - b.period);
+    const checkable = g.filter(t => !t.cancelled);
+    const content = [];
+    const homework = [];
+    const memos = [];
+    const notes = [];
+    g.forEach(t => {
+      const l = DataManager.getLessonByTimetable(t.id);
+      if (l) {
+        (l.checkedKnowledgeIds || []).forEach(kid => {
+          const k = DataManager.getKnowledge(kid);
+          if (k && k.name) content.push(k.name);
+        });
+        (l.homework || []).forEach(h => { if (h && h.content) homework.push(h.content); });
+        if (l.memo) memos.push(l.memo);
+      }
+      const n = scheduleNoteOf(t);
+      if (n) notes.push(n);
+    });
+    rows.push([
+      '第' + g[0].week + '周',
+      dateFull(g[0].week, g[0].day),
+      checkable.length * 2,
+      [...new Set(content)].join('；'),
+      homework.join('；'),
+      [...new Set(notes)].join('；'),
+      [...new Set(memos)].join('；')
+    ]);
+  });
+  return '\uFEFF' + rows.map(r => r.map(csvCell).join(',')).join('\r\n');
 }
 
 function openScheduleEditSheet(tid) {
@@ -556,7 +621,7 @@ function renderLessonDetail() {
  * 模块四：知识看板
  * ============================================================ */
 function renderBoard() {
-  const cat = State.boardCategory || '发音';
+  const cat = State.boardCategory || CATS[0];
   const total = DataManager.data.knowledgeItems.length;
   const doneY = DataManager.data.knowledgeItems.filter(k => {
     const u = DataManager.unitOfKnowledge(k.id);
@@ -654,7 +719,7 @@ function openStudentFormSheet(sid) {
   openSheet(s ? '编辑学生' : '添加学生', `
     <div class="space-y-3">
       <div><label class="text-[15px] text-stone-500">学号</label>
-        <input id="stuNo" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none focus:border-stone-400" placeholder="请输入学号" value="${s ? esc(s.studentNo) : ''}"></div>
+        <input id="stuNo" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none focus:border-stone-400" placeholder="请补全后两位，如 01" value="${s ? esc(s.studentNo) : '26114500'}"></div>
       <div><label class="text-[15px] text-stone-500">姓名</label>
         <input id="stuName" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none focus:border-stone-400" placeholder="学生姓名" value="${s ? esc(s.name) : ''}"></div>
       <button data-action="save-student" data-sid="${sid || ''}" class="w-full rounded-xl bg-[#37352F] text-white py-3 text-[16px] font-medium">保存</button>
@@ -771,7 +836,7 @@ function handleAction(action, el) {
     case 'close-sidebar': $('#drawer').classList.remove('open'); $('#overlay').classList.remove('open'); break;
     case 'nav':
       State.view = el.dataset.view; State.lessonId = null; State.unitId = null; State.tid = null;
-      State.timetableWeek = null; State.studentId = null; State.studentUI = null; State.boardCategory = '发音';
+      State.timetableWeek = null; State.studentId = null; State.studentUI = null; State.boardCategory = CATS[0];
       $('#drawer').classList.remove('open'); $('#overlay').classList.remove('open');
       renderApp(); break;
 
@@ -1059,6 +1124,13 @@ function handleAction(action, el) {
       State.studentUI = null; DataManager.save(); renderApp(); toast('已保存'); break;
     }
 
+    /* ---- 课程进度表导出 ---- */
+    case 'export-progress-csv': {
+      downloadText('课程进度表_2026-2027.csv', buildScheduleProgressCsv(), 'text/csv;charset=utf-8');
+      toast('课程进度表已导出');
+      break;
+    }
+
     /* ---- 备份/恢复 ---- */
     case 'backup-export': {
       const blob = new Blob([JSON.stringify(DataManager.data, null, 2)], { type: 'application/json' });
@@ -1086,7 +1158,7 @@ function handleAction(action, el) {
         DataManager.load();
         DataManager.save();
         State.lessonId = null; State.unitId = null; State.tid = null; State.timetableWeek = null;
-        State.studentId = null; State.studentUI = null; State.selectedStudents = new Set(); State.boardCategory = '发音';
+        State.studentId = null; State.studentUI = null; State.selectedStudents = new Set(); State.boardCategory = CATS[0];
         closeSheet(); renderApp(); toast('数据已清空，已恢复初始状态');
       }
       break;
