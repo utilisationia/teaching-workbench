@@ -93,10 +93,40 @@ const DataManager = {
       d.lessons.push({
         id: 'l1', timetableId: firstT ? firstT.id : (d.timetable[0] || {}).id, unitId: d.syllabus[0].id,
         checkedKnowledgeIds: [], completed: false, completedAt: null,
-        memo: '', memoAt: null, homework: []
+        memos: [], homework: []
       });
     }
+    d.lessons.forEach(l => {
+      if (!Array.isArray(l.memos)) {
+        l.memos = l.memo ? [{ id: uid('m'), content: l.memo, createdAt: l.memoAt || l.completedAt || new Date().toISOString() }] : [];
+      }
+      if (!Array.isArray(l.homework)) l.homework = [];
+      l.homework.forEach(h => { if (!h.id) h.id = uid('h'); });
+      if (!Array.isArray(l.checkedKnowledgeIds)) l.checkedKnowledgeIds = [];
+    });
+    // Add new built-in knowledge to existing local records without replacing user edits.
+    const u1 = d.syllabus.find(u => u.id === 'u1');
+    if (u1) {
+      const additions = ['k178', 'k179', 'k180'];
+      additions.forEach(id => {
+        const item = knowledgeItems.find(k => k.id === id);
+        if (item && !d.knowledgeItems.some(k => k.id === id)) d.knowledgeItems.push(clone(item));
+      });
+      u1.knowledgeIds = u1.knowledgeIds.filter(id => !additions.includes(id));
+      const anchor = u1.knowledgeIds.indexOf('k12');
+      u1.knowledgeIds.splice(anchor < 0 ? u1.knowledgeIds.length : anchor + 1, 0, ...additions);
+    }
+    this.recomputeUnitProgress();
     if (!d.meta.currentLessonId || !d.lessons.some(l => l.id === d.meta.currentLessonId)) d.meta.currentLessonId = d.lessons[0].id;
+  },
+  recomputeUnitProgress() {
+    this.data.syllabus.forEach(u => {
+      const lessons = this.data.lessons.filter(l => l.completed && l.unitId === u.id);
+      const checked = new Set(lessons.flatMap(l => l.checkedKnowledgeIds || []));
+      u.checkedKnowledgeIds = u.knowledgeIds.filter(id => checked.has(id));
+      u.completed = u.knowledgeIds.length > 0 && u.knowledgeIds.every(id => checked.has(id));
+      u.completedAt = u.completed ? lessons.map(l => l.completedAt).filter(Boolean).sort().slice(-1)[0] || null : null;
+    });
   },
   recalc() { if (this.data && this.data.meta) this.data.meta.totalLessons = checkableList().length; },
   getTimetable(id) { return this.data.timetable.find(t => t.id === id); },
@@ -128,14 +158,16 @@ const State = {
 /* ============================================================
  * Toast / 底部抽屉
  * ============================================================ */
-function toast(msg) {
+function toast(msg, duration) {
   const t = $('#toast');
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(t._h);
-  t._h = setTimeout(() => t.classList.remove('show'), 1800);
+  t._h = setTimeout(() => t.classList.remove('show'), duration || 1800);
 }
+let sheetCloseTimer = null;
 function openSheet(title, bodyHtml) {
+  clearTimeout(sheetCloseTimer);
   $('#sheetRoot').innerHTML = `
     <div id="sheetBackdrop" class="sheet-backdrop" data-action="close-sheet"></div>
     <div id="sheet" class="sheet">
@@ -154,7 +186,7 @@ function closeSheet() {
   const b = $('#sheetBackdrop'), s = $('#sheet');
   if (b) b.classList.remove('open');
   if (s) s.classList.remove('open');
-  setTimeout(() => { $('#sheetRoot').innerHTML = ''; }, 300);
+  sheetCloseTimer = setTimeout(() => { $('#sheetRoot').innerHTML = ''; }, 300);
 }
 function downloadText(filename, text, type) {
   const blob = new Blob([text], { type: type || 'text/plain;charset=utf-8' });
@@ -249,34 +281,37 @@ function renderProgress() {
   if (!lesson) lesson = DataManager.currentLesson();
   const t = DataManager.getTimetable(lesson.timetableId);
   const unit = DataManager.getUnit(lesson.unitId);
-  const readonly = !!lesson.completed;
   const isCurrent = lesson.id === d.meta.currentLessonId;
-  const tIdx = checkableList().findIndex(x => x.id === lesson.timetableId);
+  const orderedLessons = checkableList();
+  const tIdx = orderedLessons.findIndex(x => x.id === lesson.timetableId);
+  const priorTimetableIds = new Set(orderedLessons.slice(0, tIdx).map(x => x.id));
+  const priorChecked = new Set(d.lessons.filter(l => l.completed && priorTimetableIds.has(l.timetableId)).flatMap(l => l.checkedKnowledgeIds));
   const allDone = done >= total;
 
   const knowledgeRows = unit.knowledgeIds.map(kid => {
     const k = DataManager.getKnowledge(kid);
     if (!k) return '';
     const checked = lesson.checkedKnowledgeIds.includes(kid);
+    const prior = priorChecked.has(kid);
     return `
       <div class="flex items-center gap-2 py-1.5">
-        <button data-action="add-hw-knowledge" data-kid="${kid}" ${readonly ? 'disabled' : ''} class="w-7 h-7 shrink-0 flex items-center justify-center rounded-lg border border-stone-200 text-stone-500 ${readonly ? 'opacity-40' : ''}">📝</button>
-        <button data-action="toggle-knowledge" data-kid="${kid}" ${readonly ? 'disabled' : ''} class="flex-1 min-w-0 flex items-start gap-2 text-left">
+        <button data-action="add-hw-knowledge" data-kid="${kid}" class="w-7 h-7 shrink-0 flex items-center justify-center rounded-lg border border-stone-200 text-stone-500">📝</button>
+        <button data-action="toggle-knowledge" data-kid="${kid}" class="flex-1 min-w-0 flex items-start gap-2 text-left">
           <span class="shrink-0 text-[16px]">${checked ? '☑️' : '⬜️'}</span>
-          <span class="text-[16px] leading-snug ${checked ? 'text-stone-400 line-through' : ''}"><span class="tag ${catColor(k.category)} mr-1">${k.category}</span>${esc(k.name)}</span>
+          <span class="text-[16px] leading-snug ${checked ? 'text-stone-400 line-through' : ''}"><span class="tag ${catColor(k.category)} mr-1">${k.category}</span>${esc(k.name)}${prior ? '<span class="text-xs text-stone-400 ml-1">此前已讲</span>' : ''}</span>
         </button>
       </div>`;
   }).join('');
 
-  const memoBlock = lesson.memo
-    ? `<div class="rounded-xl bg-stone-50 border border-stone-100 px-3 py-2 text-[16px]">${esc(lesson.memo)}<div class="text-[13px] text-stone-400 mt-1">${fmtDT(lesson.memoAt || lesson.completedAt)} · <button data-action="edit-memo" class="text-emerald-600">编辑</button></div></div>`
+  const memoBlock = lesson.memos.length
+    ? lesson.memos.map(m => `<div class="rounded-xl bg-stone-50 border border-stone-100 px-3 py-2 text-[16px]">${esc(m.content)}<div class="text-[13px] text-stone-400 mt-1">${fmtDT(m.createdAt)} · <button data-action="edit-memo" data-memo="${m.id}" class="text-emerald-600">编辑</button></div></div>`).join('')
     : `<div class="text-[15px] text-stone-400">暂无备注</div>`;
 
   const hwBlock = (lesson.homework && lesson.homework.length)
     ? lesson.homework.map(h => `
         <div class="flex items-start gap-2 rounded-xl bg-stone-50 border border-stone-100 px-3 py-2 text-[16px]">
           <span class="tag ${catColor(h.category)} shrink-0">${esc(h.category)}</span>
-          <span class="min-w-0">${esc(h.content)}</span>
+          <span class="min-w-0 flex-1">${esc(h.content)}</span><button data-action="edit-homework" data-hid="${h.id}" class="text-emerald-600 text-sm">编辑</button><button data-action="delete-homework" data-hid="${h.id}" class="text-red-500 text-sm">删除</button>
         </div>`).join('')
     : `<div class="text-[15px] text-stone-400">暂无作业</div>`;
 
@@ -301,10 +336,10 @@ function renderProgress() {
           </div>
         </div>
         <div class="mt-2 flex items-center gap-2">
-          <select data-action="unit-change" data-lesson="${lesson.id}" ${readonly || !isCurrent ? 'disabled' : ''} class="flex-1 min-w-0 text-[15px] rounded-lg border border-stone-200 bg-white px-2 py-1.5 focus:outline-none ${readonly ? 'text-stone-400' : ''}">
+          <select data-action="unit-change" data-lesson="${lesson.id}" ${lesson.completed || !isCurrent ? 'disabled' : ''} class="flex-1 min-w-0 text-[15px] rounded-lg border border-stone-200 bg-white px-2 py-1.5 focus:outline-none ${lesson.completed ? 'text-stone-400' : ''}">
             ${d.syllabus.map(u => `<option value="${u.id}" ${u.id === unit.id ? 'selected' : ''}>${unitAbbr(u)} ${esc(titleShort(u.title))}</option>`).join('')}
           </select>
-          ${readonly
+          ${lesson.completed
             ? `<span class="text-xs text-emerald-600 font-medium whitespace-nowrap">✅ ${fmtDT(lesson.completedAt).slice(5, 16)}</span>`
             : `<span class="text-xs text-stone-400 whitespace-nowrap">未打卡</span>`}
         </div>
@@ -320,21 +355,20 @@ function renderProgress() {
       <div class="card px-3 py-3">
         <div class="text-[17px] font-semibold mb-2">📒 本节课备注</div>
         ${memoBlock}
-        ${!readonly ? `
           <div class="flex gap-2 mt-2">
-            <input id="memoInput" class="flex-1 min-w-0 rounded-xl border border-stone-200 px-3 py-2 text-[16px] focus:outline-none focus:border-stone-400" placeholder="记录本节课备注…" value="${esc(lesson.memo || '')}">
+            <input id="memoInput" class="flex-1 min-w-0 rounded-xl border border-stone-200 px-3 py-2 text-[16px] focus:outline-none focus:border-stone-400" placeholder="记录本节课备注…">
             <button data-action="save-memo" class="shrink-0 rounded-xl bg-[#37352F] text-white text-[15px] px-4">确认添加</button>
-          </div>` : ''}
+          </div>
       </div>
 
       <div class="card px-3 py-3">
         <div class="text-[17px] font-semibold mb-2">📚 本课课后作业</div>
         <div class="space-y-1">${hwBlock}</div>
-        ${!readonly ? `<button data-action="add-homework" class="mt-2 w-full rounded-xl border border-dashed border-stone-300 py-2 text-[15px] text-stone-500">+ 添加作业</button>` : ''}
+        <button data-action="add-homework" class="mt-2 w-full rounded-xl border border-dashed border-stone-300 py-2 text-[15px] text-stone-500">+ 添加作业</button>
       </div>
     </div>
-    <div class="fixed left-0 right-0 bottom-0 z-30 px-4 pb-4 safe-bottom pt-3 bg-gradient-to-t from-[#F7F6F3] via-[#F7F6F3]/95 to-transparent">
-      ${readonly
+    <div class="bottom-action">
+      ${lesson.completed
         ? `<button disabled class="w-full rounded-2xl bg-stone-200 text-stone-400 py-3.5 text-[17px] font-semibold">✅ 已打卡</button>`
         : `<button data-action="complete-lesson" class="w-full rounded-2xl bg-[#4CAF50] text-white py-3.5 text-[17px] font-semibold shadow-lg shadow-emerald-200 active:scale-[0.99]">✅ 完成本课打卡</button>`}
     </div>`;
@@ -380,7 +414,7 @@ function renderSyllabusDetail() {
   }).join('');
   return pageShell(`${unitAbbr(unit)}: ${esc(titleShort(unit.title))}`,
     (rows || `<div class="text-[15px] text-stone-400 px-2">暂无知识点，点击下方添加</div>`) +
-    `<button data-action="open-add-knowledge" class="w-full rounded-2xl bg-[#37352F] text-white py-3 text-[16px] font-medium fixed bottom-0 left-0 right-0 mx-auto max-w-md safe-bottom">+ 添加知识点</button>`,
+    `<div class="bottom-action"><button data-action="open-add-knowledge" class="w-full rounded-2xl bg-[#37352F] text-white py-3 text-[16px] font-medium">+ 添加知识点</button></div>`,
     { back: 'open-syllabus', right: `<span class="text-xs text-stone-400 whitespace-nowrap">${(unit.checkedKnowledgeIds || []).length}/${unit.knowledgeIds.length}</span>` });
 }
 
@@ -483,6 +517,10 @@ function scheduleNoteOf(t) {
   return t.originalNote;
 }
 function csvCell(v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; }
+function roman(n) {
+  const parts = [[1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'], [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']];
+  return parts.map(([value, symbol]) => { const count = Math.floor(n / value); n %= value; return symbol.repeat(count); }).join('');
+}
 function buildScheduleProgressCsv() {
   const d = DataManager.data;
   const order = sortedTimetable();
@@ -494,6 +532,12 @@ function buildScheduleProgressCsv() {
     groups[index.get(key)].push(t);
   });
   const rows = [['周次', '日期', '课时数', '教学内容', '作业', '备注', '其他备注']];
+  const totalOccurrences = new Map();
+  order.forEach(t => {
+    const l = DataManager.getLessonByTimetable(t.id);
+    if (l) (l.checkedKnowledgeIds || []).forEach(kid => totalOccurrences.set(kid, (totalOccurrences.get(kid) || 0) + 1));
+  });
+  const occurrence = new Map();
   groups.forEach(g => {
     g.sort((a, b) => a.period - b.period);
     const checkable = g.filter(t => !t.cancelled);
@@ -504,12 +548,18 @@ function buildScheduleProgressCsv() {
     g.forEach(t => {
       const l = DataManager.getLessonByTimetable(t.id);
       if (l) {
+        const lessonContent = [];
         (l.checkedKnowledgeIds || []).forEach(kid => {
           const k = DataManager.getKnowledge(kid);
-          if (k && k.name) content.push(k.name);
+          if (k && k.name) {
+            const count = (occurrence.get(kid) || 0) + 1;
+            occurrence.set(kid, count);
+            lessonContent.push(k.name + (totalOccurrences.get(kid) > 1 ? ' ' + roman(count) : ''));
+          }
         });
-        (l.homework || []).forEach(h => { if (h && h.content) homework.push(h.content); });
-        if (l.memo) memos.push(l.memo);
+        if (lessonContent.length) content.push('第' + t.period + '大节：' + lessonContent.join('、'));
+        (l.homework || []).forEach(h => { if (h && h.content) homework.push('第' + t.period + '大节：' + h.content); });
+        (l.memos || []).forEach(m => { if (m.content) memos.push('第' + t.period + '大节：' + m.content); });
       }
       const n = scheduleNoteOf(t);
       if (n) notes.push(n);
@@ -518,10 +568,10 @@ function buildScheduleProgressCsv() {
       '第' + g[0].week + '周',
       dateFull(g[0].week, g[0].day),
       checkable.length * 2,
-      [...new Set(content)].join('；'),
+      content.join('；'),
       homework.join('；'),
       [...new Set(notes)].join('；'),
-      [...new Set(memos)].join('；')
+      memos.join('；')
     ]);
   });
   return '\uFEFF' + rows.map(r => r.map(csvCell).join(',')).join('\r\n');
@@ -612,8 +662,9 @@ function renderLessonDetail() {
     ${t.cancelled ? `<div class="card px-4 py-3 bg-red-50 border-red-200 text-red-600 text-[15px] leading-relaxed">本节因节日 / 活动被冲掉，不参与打卡，也不计入总进度。若学校临时补课，可在课表点 ✏️ 恢复为正常，或另行"添加课程"。</div>` : ''}
     <div class="text-[16px] font-semibold pt-1">知识点完成情况</div>
     <div class="space-y-1.5">${rows}</div>
-    ${l && l.memo ? `<div class="text-[16px] font-semibold pt-1">备注</div><div class="card px-3 py-2 text-[16px]">${esc(l.memo)}<div class="text-[13px] text-stone-400 mt-1">${fmtDT(l.memoAt)}</div></div>` : ''}
-    ${l && l.homework && l.homework.length ? `<div class="text-[16px] font-semibold pt-1">课后作业</div><div class="space-y-1.5">${l.homework.map(h => `<div class="card px-3 py-2 text-[16px]"><span class="tag ${catColor(h.category)} mr-1">${esc(h.category)}</span>${esc(h.content)}</div>`).join('')}</div>` : ''}`;
+    ${l && l.memos.length ? `<div class="text-[16px] font-semibold pt-1">课程备注</div>${l.memos.map(m => `<div class="card px-3 py-2 text-[16px]">${esc(m.content)}<div class="text-[13px] text-stone-400 mt-1">${fmtDT(m.createdAt)}</div></div>`).join('')}` : ''}
+    ${l && l.homework && l.homework.length ? `<div class="text-[16px] font-semibold pt-1">课后作业</div><div class="space-y-1.5">${l.homework.map(h => `<div class="card px-3 py-2 text-[16px]"><span class="tag ${catColor(h.category)} mr-1">${esc(h.category)}</span>${esc(h.content)}</div>`).join('')}</div>` : ''}
+    ${l ? `<button data-action="edit-lesson" data-lesson="${l.id}" class="w-full rounded-xl bg-[#37352F] text-white py-3 text-[16px]">${done ? '修改已打卡课程' : '打开课程打卡'}</button>` : ''}`;
   return pageShell('课程详情', body, { back: 'open-timetable' });
 }
 
@@ -628,7 +679,14 @@ function renderBoard() {
     return u && (u.checkedKnowledgeIds || []).includes(k.id);
   }).length;
   const pracZ = DataManager.data.knowledgeItems.filter(k => k.practices && k.practices.length).length;
-  const items = DataManager.data.knowledgeItems.filter(k => k.category === cat).map(k => {
+  const orderOf = kid => {
+    const u = DataManager.unitOfKnowledge(kid);
+    return u ? [DataManager.data.syllabus.indexOf(u), u.knowledgeIds.indexOf(kid)] : [999, 999];
+  };
+  const items = DataManager.data.knowledgeItems.filter(k => k.category === cat).sort((a, b) => {
+    const x = orderOf(a.id), y = orderOf(b.id);
+    return x[0] - y[0] || x[1] - y[1];
+  }).map(k => {
     const u = DataManager.unitOfKnowledge(k.id);
     const c = u && (u.checkedKnowledgeIds || []).includes(k.id);
     return `
@@ -654,14 +712,29 @@ function collectNotes() {
     const t = DataManager.getTimetable(l.timetableId);
     const u = DataManager.getUnit(l.unitId);
     const lab = u ? `[${unitAbbr(u)}-${titleShort(u.title)}` : '[';
-    if (l.memo) out.push({ ts: l.memoAt || l.completedAt || new Date().toISOString(), date: fmtDateCN(l.memoAt || l.completedAt || Date.now()), group: t ? t.displayName : '', label: lab + ' 备注]', text: l.memo, kind: 'memo' });
-    (l.homework || []).forEach(h => out.push({ ts: h.timestamp, date: fmtDateCN(h.timestamp), group: t ? t.displayName : '', label: lab + ' 作业]', text: h.content, kind: 'hw' }));
+    (l.memos || []).forEach(m => out.push({ ts: m.createdAt, date: fmtDateCN(m.createdAt), group: t ? t.displayName : '', label: lab + ' 课程备注]', text: m.content, kind: 'memo' }));
+    (l.homework || []).forEach(h => out.push({ ts: h.timestamp, date: fmtDateCN(h.timestamp), group: t ? t.displayName : '', label: lab + ' 作业备注]', text: h.content, kind: 'hw' }));
   });
   DataManager.data.knowledgeItems.forEach(k => (k.practices || []).forEach(p => {
     out.push({ ts: p.timestamp, date: fmtDateCN(p.timestamp), group: '', label: `[${k.category}-${titleShort(k.name)} 练习]`, text: p.note || '（已布置练习）', kind: 'practice' });
   }));
   out.sort((a, b) => new Date(b.ts) - new Date(a.ts));
   return out;
+}
+function groupedNotesText() {
+  const dates = new Map();
+  collectNotes().forEach(n => {
+    if (!dates.has(n.date)) dates.set(n.date, []);
+    dates.get(n.date).push(n);
+  });
+  return [...dates].map(([date, entries]) => {
+    const sections = [['memo', '课程备注'], ['hw', '作业备注'], ['practice', '练习记录']]
+      .map(([kind, title]) => {
+        const lines = entries.filter(n => n.kind === kind).map(n => `- ${fmtTime(n.ts)} ${n.group} ${n.label} ${n.text}`);
+        return lines.length ? title + '\n' + lines.join('\n') : '';
+      }).filter(Boolean);
+    return date + '\n' + sections.join('\n\n');
+  }).join('\n\n');
 }
 function renderNotes() {
   const notes = collectNotes();
@@ -670,13 +743,16 @@ function renderNotes() {
   const body = Object.keys(groups).map(key => `
     <div>
       <div class="text-[15px] font-semibold text-stone-500 mt-2 mb-1">${esc(key)}</div>
-      <div class="space-y-1.5">${groups[key].map(n => `
+      ${[['memo', '课程备注'], ['hw', '作业备注'], ['practice', '练习记录']].map(([kind, title]) => {
+        const entries = groups[key].filter(n => n.kind === kind);
+        return entries.length ? `<div class="text-[14px] font-medium text-stone-500 mt-2 mb-1">${title}</div><div class="space-y-1.5">${entries.map(n => `
         <div class="card px-3 py-2 text-[16px] leading-snug">
           <span class="text-[13px] text-stone-400 mr-1">${fmtTime(n.ts)}</span>
+          <span class="text-[13px] text-stone-500">${esc(n.group)}</span>
           <span class="tag ${n.kind === 'memo' ? 'bg-blue-100 text-blue-700' : n.kind === 'hw' ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}">${esc(n.label)}</span>
           <span class="block mt-1">${esc(n.text)}</span>
-        </div>`).join('')}
-      </div>
+        </div>`).join('')}</div>` : '';
+      }).join('')}
     </div>`).join('');
   return pageShell('📝 备注汇总', body || '<div class="text-[15px] text-stone-400 px-1">暂无备注</div>', {
     right: `<button data-action="export-notes" class="text-[14px] text-emerald-600 font-medium bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">📋 导出全部</button>`
@@ -815,14 +891,14 @@ function buildExport(format) {
 /* ============================================================
  * 作业/练习弹窗
  * ============================================================ */
-function openHomeworkSheet(presetCat, lessonId, kidId) {
-  openSheet('添加作业/练习', `
+function openHomeworkSheet(presetCat, lessonId, kidId, homework) {
+  openSheet(homework ? '编辑作业/练习' : '添加作业/练习', `
     <div class="space-y-3">
       <div><label class="text-[15px] text-stone-500">分类</label>
         <select id="hwCat" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">${CATS.map(c => `<option ${c === presetCat ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
       <div><label class="text-[15px] text-stone-500">内容</label>
-        <textarea id="hwContent" rows="2" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none focus:border-stone-400" placeholder="作业/练习内容"></textarea></div>
-      <button data-action="save-homework" data-lesson="${lessonId}" data-kid="${kidId || ''}" class="w-full rounded-xl bg-[#37352F] text-white py-3 text-[16px] font-medium">保存</button>
+        <textarea id="hwContent" rows="2" class="mt-1 w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px] focus:outline-none focus:border-stone-400" placeholder="作业/练习内容">${esc(homework ? homework.content : '')}</textarea></div>
+      <button data-action="save-homework" data-lesson="${lessonId}" data-kid="${kidId || ''}" data-hid="${homework ? homework.id : ''}" class="w-full rounded-xl bg-[#37352F] text-white py-3 text-[16px] font-medium">保存</button>
     </div>`);
 }
 
@@ -855,11 +931,11 @@ function handleAction(action, el) {
     case 'goto-current': State.lessonId = null; renderApp(); break;
     case 'toggle-knowledge': {
       const lesson = DataManager.getLessonById(State.lessonId || d.meta.currentLessonId);
-      if (!lesson || lesson.completed) break;
+      if (!lesson) break;
       const kid = el.dataset.kid;
       const i = lesson.checkedKnowledgeIds.indexOf(kid);
       if (i >= 0) lesson.checkedKnowledgeIds.splice(i, 1); else lesson.checkedKnowledgeIds.push(kid);
-      DataManager.save(); renderApp(); break;
+      DataManager.recomputeUnitProgress(); DataManager.save(); renderApp(); break;
     }
     case 'add-hw-knowledge': {
       const lesson = DataManager.getLessonById(State.lessonId || d.meta.currentLessonId);
@@ -869,20 +945,48 @@ function handleAction(action, el) {
     }
     case 'save-memo': {
       const lesson = DataManager.getLessonById(State.lessonId || d.meta.currentLessonId);
-      if (!lesson || lesson.completed) break;
+      if (!lesson) break;
       const v = $('#memoInput').value.trim();
-      lesson.memo = v; lesson.memoAt = new Date().toISOString();
-      DataManager.save(); renderApp(); toast(v ? '备注已保存' : '备注已清空'); break;
+      if (!v) { toast('请填写备注'); break; }
+      lesson.memos.push({ id: uid('m'), content: v, createdAt: new Date().toISOString() });
+      DataManager.save(); renderApp(); toast('备注已保存'); break;
     }
     case 'edit-memo': {
-      const inp = $('#memoInput');
-      if (inp) { inp.focus(); inp.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+      const lesson = DataManager.getLessonById(State.lessonId || d.meta.currentLessonId);
+      const memo = lesson && lesson.memos.find(m => m.id === el.dataset.memo);
+      if (!memo) break;
+      openSheet('编辑课程备注', `<textarea id="editMemoInput" rows="4" class="w-full rounded-xl border border-stone-200 px-3 py-2.5 text-[16px]">${esc(memo.content)}</textarea><button data-action="update-memo" data-lesson="${lesson.id}" data-memo="${memo.id}" class="w-full mt-3 rounded-xl bg-[#37352F] text-white py-3">保存修改</button>`);
       break;
+    }
+    case 'update-memo': {
+      const lesson = DataManager.getLessonById(el.dataset.lesson);
+      const memo = lesson && lesson.memos.find(m => m.id === el.dataset.memo);
+      const v = $('#editMemoInput').value.trim();
+      if (!memo || !v) { toast('请填写备注'); break; }
+      memo.content = v; memo.updatedAt = new Date().toISOString();
+      DataManager.save(); closeSheet(); renderApp(); toast('备注已修改'); break;
     }
     case 'add-homework': {
       const lesson = DataManager.getLessonById(State.lessonId || d.meta.currentLessonId);
-      if (lesson && !lesson.completed) openHomeworkSheet('', lesson.id, '');
+      if (lesson) openHomeworkSheet('', lesson.id, '');
       break;
+    }
+    case 'edit-homework': {
+      const lesson = DataManager.getLessonById(State.lessonId || d.meta.currentLessonId);
+      const hw = lesson && lesson.homework.find(h => h.id === el.dataset.hid);
+      if (hw) openHomeworkSheet(hw.category, lesson.id, hw.knowledgeId || '', hw);
+      break;
+    }
+    case 'delete-homework': {
+      const lesson = DataManager.getLessonById(State.lessonId || d.meta.currentLessonId);
+      const hw = lesson && lesson.homework.find(h => h.id === el.dataset.hid);
+      if (!hw || !confirm('确定删除这条作业吗？')) break;
+      lesson.homework = lesson.homework.filter(h => h.id !== hw.id);
+      if (hw.knowledgeId && hw.practiceId) {
+        const k = DataManager.getKnowledge(hw.knowledgeId);
+        if (k) k.practices = (k.practices || []).filter(p => p.id !== hw.practiceId);
+      }
+      DataManager.save(); renderApp(); toast('作业已删除'); break;
     }
     case 'save-homework': {
       const cat = $('#hwCat').value, content = $('#hwContent').value.trim();
@@ -891,10 +995,20 @@ function handleAction(action, el) {
       const kid = el.dataset.kid || '';
       if (!kid && !content) { toast('请填写作业内容'); break; }
       const ts = new Date().toISOString();
-      lesson.homework.push({ category: cat, content: content || '（练习）', timestamp: ts });
-      if (kid) {
-        const k = DataManager.getKnowledge(kid);
-        if (k) k.practices.push({ timestamp: ts, note: content || '已布置练习' });
+      const existing = lesson.homework.find(h => h.id === el.dataset.hid);
+      if (existing) { existing.category = cat; existing.content = content || '（练习）'; }
+      else {
+        const practiceId = kid ? uid('p') : '';
+        lesson.homework.push({ id: uid('h'), category: cat, content: content || '（练习）', timestamp: ts, knowledgeId: kid, practiceId });
+        if (kid) {
+          const k = DataManager.getKnowledge(kid);
+          if (k) k.practices.push({ id: practiceId, timestamp: ts, note: content || '已布置练习' });
+        }
+      }
+      if (existing && existing.knowledgeId && existing.practiceId) {
+        const k = DataManager.getKnowledge(existing.knowledgeId);
+        const p = k && (k.practices || []).find(x => x.id === existing.practiceId);
+        if (p) p.note = existing.content;
       }
       DataManager.save(); closeSheet(); renderApp(); toast('已保存'); break;
     }
@@ -903,15 +1017,12 @@ function handleAction(action, el) {
       if (!lesson || lesson.completed) break;
       lesson.completed = true; lesson.completedAt = new Date().toISOString();
       const unit = DataManager.getUnit(lesson.unitId);
-      unit.checkedKnowledgeIds = [...new Set([...(unit.checkedKnowledgeIds || []), ...lesson.checkedKnowledgeIds])];
-      if (unit.knowledgeIds.every(kid => unit.checkedKnowledgeIds.includes(kid))) {
-        unit.completed = true; unit.completedAt = new Date().toISOString();
-      }
+      DataManager.recomputeUnitProgress();
       const nextT = nextTimetableAfter(lesson.timetableId);
       if (nextT) {
         let next = DataManager.getLessonByTimetable(nextT.id);
         if (!next) {
-          next = { id: uid('l'), timetableId: nextT.id, unitId: presetUnitFor(nextT) || unit.id, checkedKnowledgeIds: [], completed: false, completedAt: null, memo: '', memoAt: null, homework: [] };
+          next = { id: uid('l'), timetableId: nextT.id, unitId: presetUnitFor(nextT) || unit.id, checkedKnowledgeIds: [], completed: false, completedAt: null, memos: [], homework: [] };
           d.lessons.push(next);
         }
         d.meta.currentLessonId = next.id;
@@ -936,13 +1047,13 @@ function handleAction(action, el) {
       d.knowledgeItems.push(item);
       const unit = DataManager.getUnit(State.unitId);
       unit.knowledgeIds.push(item.id);
-      DataManager.save(); closeSheet(); renderApp(); toast('已新建知识点'); break;
+      DataManager.recomputeUnitProgress(); DataManager.save(); closeSheet(); renderApp(); toast('已新建知识点'); break;
     }
     case 'pick-knowledge': {
       const unit = DataManager.getUnit(State.unitId);
       const kid = el.dataset.kid;
       if (unit && !unit.knowledgeIds.includes(kid)) unit.knowledgeIds.push(kid);
-      DataManager.save(); closeSheet(); renderApp(); break;
+      DataManager.recomputeUnitProgress(); DataManager.save(); closeSheet(); renderApp(); break;
     }
     case 'edit-knowledge': openEditKnowledgeSheet(el.dataset.kid); break;
     case 'save-edit-knowledge': {
@@ -958,7 +1069,7 @@ function handleAction(action, el) {
       if (unit && confirm('确定将该知识点从本项目移除吗？（不会删除全局知识点库）')) {
         unit.knowledgeIds = unit.knowledgeIds.filter(x => x !== kid);
         unit.checkedKnowledgeIds = (unit.checkedKnowledgeIds || []).filter(x => x !== kid);
-        DataManager.save(); renderApp(); toast('已移除关联');
+        DataManager.recomputeUnitProgress(); DataManager.save(); renderApp(); toast('已移除关联');
       }
       break;
     }
@@ -966,6 +1077,7 @@ function handleAction(action, el) {
     /* ---- 课表 ---- */
     case 'week-tab': State.timetableWeek = +el.dataset.week; renderApp(); break;
     case 'open-lesson': State.tid = el.dataset.tid; State.view = 'lessonDetail'; renderApp(); break;
+    case 'edit-lesson': State.lessonId = el.dataset.lesson; State.view = 'progress'; renderApp(); break;
     case 'open-timetable': State.view = 'timetable'; State.tid = null; renderApp(); break;
     case 'edit-schedule': openScheduleEditSheet(el.dataset.tid); break;
     case 'save-schedule': {
@@ -1025,7 +1137,7 @@ function handleAction(action, el) {
 
     /* ---- 备注汇总 ---- */
     case 'export-notes': {
-      const txt = collectNotes().map(n => `${fmtDT(n.ts)} ${n.label} ${n.text}`).join('\n');
+      const txt = groupedNotesText();
       const done = () => toast('已复制到剪贴板');
       const fallback = () => {
         const ta = document.createElement('textarea');
@@ -1174,6 +1286,25 @@ document.addEventListener('click', e => {
   if (!el) return;
   handleAction(el.dataset.action, el);
 });
+let sidebarTouch = null;
+document.addEventListener('touchstart', e => {
+  if (e.touches.length !== 1 || $('#sheet')) return;
+  const touch = e.touches[0];
+  const drawerOpen = $('#drawer') && $('#drawer').classList.contains('open');
+  if (drawerOpen || (touch.clientX >= 24 && touch.clientX <= 70)) {
+    sidebarTouch = { x: touch.clientX, y: touch.clientY, open: drawerOpen };
+  }
+}, { passive: true });
+document.addEventListener('touchend', e => {
+  if (!sidebarTouch || !e.changedTouches.length) return;
+  const dx = e.changedTouches[0].clientX - sidebarTouch.x;
+  const dy = e.changedTouches[0].clientY - sidebarTouch.y;
+  if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+    if (sidebarTouch.open && dx < 0) handleAction('close-sidebar');
+    else if (!sidebarTouch.open && dx > 0) handleAction('open-sidebar');
+  }
+  sidebarTouch = null;
+}, { passive: true });
 document.addEventListener('change', e => {
   const el = e.target.closest('[data-action]');
   if (!el) return;
@@ -1232,8 +1363,16 @@ $('#importFile').addEventListener('change', e => {
 /* ============================================================
  * 启动
  * ============================================================ */
+let showBackupTip = false;
+try {
+  showBackupTip = !!localStorage.getItem(STORAGE_KEY) && !localStorage.getItem('teaching_workbench_v5_backup_tip');
+} catch (e) { /* Storage may be unavailable in private browsing. */ }
 DataManager.load();
 renderApp();
+if (showBackupTip) {
+  toast('更新完成，建议从侧边栏导出一次备份', 5000);
+  try { localStorage.setItem('teaching_workbench_v5_backup_tip', '1'); } catch (e) { /* Ignore unavailable storage. */ }
+}
 
 /* PWA：离线缓存（仅 https 环境下生效，本地 file:// 自动忽略） */
 if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {

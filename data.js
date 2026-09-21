@@ -115,7 +115,7 @@ const timetable = [
   {"id": "t108", "week": 17, "day": "周五", "period": 1, "displayName": "第17周周五(1.1) 第1大节", "room": "叶耀珍楼407", "periods": "3-4节", "cancelled": true, "originalNote": ""}
 ];
 const syllabus = [
-  {"id":"u1","title":"法语课的第一天","knowledgeIds":["k1","k2","k3","k4","k5","k6","k7","k8","k9","k10","k11","k12","k13","k14","k15","k16","k17","k18"],"checkedKnowledgeIds":[],"completed":false,"completedAt":null},
+  {"id":"u1","title":"法语课的第一天","knowledgeIds":["k1","k2","k3","k4","k5","k6","k7","k8","k9","k10","k11","k12","k178","k179","k180","k13","k14","k15","k16","k17","k18"],"checkedKnowledgeIds":[],"completed":false,"completedAt":null},
   {"id":"u2","title":"我是……","knowledgeIds":["k19","k20","k21","k22","k23","k24","k25","k26","k27","k28","k29","k30","k31"],"checkedKnowledgeIds":[],"completed":false,"completedAt":null},
   {"id":"u3","title":"初次见面","knowledgeIds":["k32","k33","k34","k35","k36","k37","k38","k39","k40","k41","k42"],"checkedKnowledgeIds":[],"completed":false,"completedAt":null},
   {"id":"u4","title":"介绍与自我介绍","knowledgeIds":["k43","k44","k45","k46","k47","k48","k49","k50","k51","k52","k53","k54","k55","k56","k57","k58","k59"],"checkedKnowledgeIds":[],"completed":false,"completedAt":null},
@@ -145,6 +145,9 @@ const knowledgeItems = [
   {"id":"k10","name":"元音字母组合1","category":"语音","practices":[]},
   {"id":"k11","name":"半元音1","category":"语音","practices":[]},
   {"id":"k12","name":"鼻音1","category":"语音","practices":[]},
+  {"id":"k178","name":"辅音字母组合","category":"语音","practices":[]},
+  {"id":"k179","name":"常见词尾","category":"语音","practices":[]},
+  {"id":"k180","name":"主谓句型+初识动词变位","category":"语法","practices":[]},
   {"id":"k13","name":"🎬 Totem1 Nantes单词读音","category":"语音","practices":[]},
   {"id":"k14","name":"[ER]Bonjour ! 4段对话","category":"Lecture","practices":[]},
   {"id":"k15","name":"🎬 Totem2 Bienvenue","category":"Lecture","practices":[]},
