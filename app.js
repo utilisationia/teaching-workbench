@@ -85,6 +85,10 @@ const DataManager = {
   save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(this.data)); },
   ensure() {
     const d = this.data;
+    if (!Array.isArray(d.timetable)) d.timetable = clone(timetable);
+    if (!Array.isArray(d.syllabus)) d.syllabus = clone(syllabus);
+    if (!Array.isArray(d.knowledgeItems)) d.knowledgeItems = clone(knowledgeItems);
+    if (!Array.isArray(d.students)) d.students = clone(students);
     if (!d.meta) d.meta = clone(meta);
     d.meta.totalLessons = checkableList().length;
     if (!Array.isArray(d.lessons)) d.lessons = [];

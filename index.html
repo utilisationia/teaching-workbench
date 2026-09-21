@@ -1397,7 +1397,29 @@ video {
 <div id="sheetRoot"></div>
 <div id="toast"></div>
 <input type="file" id="importFile" accept=".json,application/json" class="hidden">
-<script src="./data.js"></script>
-<script src="./app.js"></script>
+<script>
+  function showStartupError() {
+    if (document.querySelector('#app > *')) return;
+    document.getElementById('app').innerHTML = '<div style="max-width:420px;margin:0 auto;padding:calc(80px + env(safe-area-inset-top)) 24px 40px;text-align:center"><div style="font-size:42px">🔄</div><h2 style="font-size:20px">教学工作台需要刷新</h2><p style="color:#78716c;line-height:1.7">主屏幕仍在使用旧版缓存。连接网络后点击下方按钮即可修复，本地教学记录不会被清除。</p><button onclick="repairApp()" style="width:100%;border:0;border-radius:14px;background:#37352F;color:white;padding:14px;font-size:17px">刷新并修复</button></div>';
+  }
+  async function repairApp() {
+    try {
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(r => r.unregister()));
+      }
+      if ('caches' in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k)));
+      }
+    } catch (e) {}
+    location.replace('./index.html?refresh=' + Date.now());
+  }
+  window.addEventListener('error', showStartupError);
+  window.addEventListener('unhandledrejection', showStartupError);
+  setTimeout(showStartupError, 4000);
+</script>
+<script src="./data.js?v=6"></script>
+<script src="./app.js?v=6"></script>
 </body>
 </html>
