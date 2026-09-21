@@ -1,11 +1,11 @@
 'use strict';
 /* PWA 离线缓存：首次打开后缓存整个 App，之后断网秒开 */
-const CACHE_NAME = 'teaching-workbench-v6';
+const CACHE_NAME = 'teaching-workbench-v7';
 const ASSETS = [
   './',
   './index.html',
-  './app.js?v=6',
-  './data.js?v=6',
+  './app.js?v=7',
+  './data.js?v=7',
   './manifest.webmanifest',
   './icon-192.png',
   './icon-512.png'

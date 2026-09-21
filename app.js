@@ -297,11 +297,13 @@ function renderProgress() {
     if (!k) return '';
     const checked = lesson.checkedKnowledgeIds.includes(kid);
     const prior = priorChecked.has(kid);
+    const checkClass = checked ? 'knowledge-check selected' : prior ? 'knowledge-check taught' : 'knowledge-check';
+    const checkLabel = checked ? '本课已选中' : prior ? '此前已讲' : '尚未讲';
     return `
       <div class="flex items-center gap-2 py-1.5">
         <button data-action="add-hw-knowledge" data-kid="${kid}" class="w-7 h-7 shrink-0 flex items-center justify-center rounded-lg border border-stone-200 text-stone-500">📝</button>
         <button data-action="toggle-knowledge" data-kid="${kid}" class="flex-1 min-w-0 flex items-start gap-2 text-left">
-          <span class="shrink-0 text-[16px]">${checked ? '☑️' : '⬜️'}</span>
+          <span class="${checkClass}" role="img" aria-label="${checkLabel}" title="${checkLabel}">${checked ? '✓' : ''}</span>
           <span class="text-[16px] leading-snug ${checked ? 'text-stone-400 line-through' : ''}"><span class="tag ${catColor(k.category)} mr-1">${k.category}</span>${esc(k.name)}${prior ? '<span class="text-xs text-stone-400 ml-1">此前已讲</span>' : ''}</span>
         </button>
       </div>`;
@@ -353,6 +355,7 @@ function renderProgress() {
       <div class="card px-3 py-3">
         <div class="text-[17px] font-semibold mb-1">📌 ${unitAbbr(unit)} 知识点打卡</div>
         <div class="text-[13px] text-stone-400 mb-1">点击知识点切换完成状态；📝 为该知识点添加作业/练习</div>
+        <div class="knowledge-legend"><span><i class="knowledge-check"></i>尚未讲</span><span><i class="knowledge-check taught"></i>此前已讲</span><span><i class="knowledge-check selected">✓</i>本课选中</span></div>
         <div class="space-y-0.5">${knowledgeRows}</div>
       </div>
 
